@@ -20,6 +20,8 @@ import anthropic
 import httpx
 import openai
 
+from domain_detector import DomainMatch, detect_domain, _load_prompts as _load_domain_prompts
+
 # ── 설정 로드 ─────────────────────────────────────────────────────────────────
 
 def load_env(env_path: Path) -> dict[str, str]:
@@ -43,6 +45,7 @@ STT_PROVIDER = ENV.get("STT_PROVIDER", "elevenlabs")  # "elevenlabs" or "whisper
 MAX_WORKERS = int(ENV.get("MAX_WORKERS", "20"))
 CORRECTION_MODEL = ENV.get("CORRECTION_MODEL", "gpt-5.4")
 ANTHROPIC_API_KEY = ENV.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+DOMAIN_DETECTION = ENV.get("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY를 찾을 수 없습니다. .env를 확인하세요.")
@@ -368,53 +371,9 @@ def _transcribe_with_retry(fn, path: Path, offset: float, label: str,
 
 # ── 4단계: GPT 교정 (병렬) ────────────────────────────────────────────────────
 
-CORRECTION_SYSTEM_PROMPT = """You are a specialist in correcting Automatic Speech Recognition (ASR) transcripts of academic pharmaceutical/biomedical lectures.
 
-## Why ASR Output Is Fundamentally Inaccurate for This Domain
-
-ASR systems like Whisper are trained predominantly on general conversational speech. When applied to specialized pharmaceutical lectures, the output is **systematically unreliable** for several compounding reasons:
-
-1. **Domain-Specific Terminology Misrecognition**: Drug names (e.g., "sorafenib" → "sore funny"), protein targets (e.g., "EGFR" → "EG for"), pathway names (e.g., "Wnt/β-catenin" → "went beta captain"), and molecular biology terms are almost always garbled because they fall outside the model's training vocabulary.
-
-2. **Korean-English Code-Switching Errors**: These lectures are delivered in Korean with heavy English technical terminology interspersed. ASR models struggle catastrophically with this:
-   - Korean particles attached to English terms get mangled (e.g., "타겟으로" → "target으로" but heard as "타깃 으로")
-   - The model oscillates between Korean and English transcription modes mid-sentence
-   - English abbreviations spoken in Korean context are misheard (e.g., "FDA 승인" → "에프디에이 승인" or random English)
-
-3. **Acoustic Challenges in Lecture Recordings**: Background noise, room reverb, microphone distance variations, and speaker's pace changes cause systematic word-boundary errors.
-
-4. **Chemical/Mathematical Nomenclature**: IC50 values, chemical formulas (e.g., "C₂₃H₂₅ClFN₃O₃"), dosage numbers, and statistical values are almost never transcribed correctly.
-
-5. **Contextual Coherence Loss**: Even when individual words are correct, ASR lacks the domain knowledge to maintain semantic coherence — resulting in grammatically correct but scientifically nonsensical sentences.
-
-## Your Correction Task
-
-Given the above, you must:
-1. **Reconstruct technical terminology**: Use your pharmaceutical/biomedical knowledge to identify and correct misrecognized drug names, protein targets, disease names, pathway names, and molecular biology terms.
-2. **Fix Korean-English boundaries**: Properly separate Korean grammatical elements from English technical terms.
-3. **Restore scientific coherence**: When a sentence is semantically broken, reconstruct what the lecturer most likely said based on the surrounding context and domain knowledge.
-4. **Preserve lecture style**: Keep the natural spoken delivery — do NOT formalize casual explanations or remove verbal hedges/fillers that are part of the teaching style.
-5. **Keep timestamps exactly as-is**: The HH:MM:SS format must not be altered.
-6. **Output format**: Each line must be exactly `HH:MM:SS: corrected text`
-
-## Domain Context
-These are pharmaceutical AI lectures covering:
-- Drug discovery and development pipeline
-- Drug target prediction
-- AI/ML in drug development
-- Clinical trials and regulatory processes
-- Molecular docking, QSAR, pharmacokinetics
-- Korean university-level pharmaceutical science education"""
-
-CORRECTION_USER_PROMPT = """Below is a raw ASR transcript from a pharmaceutical lecture. The transcript contains numerous systematic errors as described above.
-
-Correct the ENTIRE transcript. For each line, fix technical terms, restore Korean-English boundaries, and ensure scientific coherence while preserving the speaker's natural delivery style.
-
-Raw transcript:
-{transcript_text}"""
-
-
-def _correct_chunk(chunk: list[dict], chunk_label: str) -> list[dict]:
+def _correct_chunk(chunk: list[dict], chunk_label: str,
+                   system_prompt: str, user_prompt: str) -> list[dict]:
     """단일 교정 청크 처리 (워커에서 호출)"""
     transcript_text = "\n".join(f"{s['time']}: {s['text']}" for s in chunk)
     print(f"    [GPT] 교정 중: {chunk_label} ({len(chunk)}개 세그먼트)")
@@ -424,8 +383,8 @@ def _correct_chunk(chunk: list[dict], chunk_label: str) -> list[dict]:
             response = openai_client.chat.completions.create(
                 model=CORRECTION_MODEL,
                 messages=[
-                    {"role": "system", "content": CORRECTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": CORRECTION_USER_PROMPT.format(
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt.format(
                         transcript_text=transcript_text
                     )},
                 ],
@@ -462,9 +421,13 @@ def _parse_corrected_text(text: str) -> list[dict]:
     return segments
 
 
-def correct_transcript_parallel(raw_segments: list[dict], video_name: str) -> list[dict]:
+def correct_transcript_parallel(raw_segments: list[dict], video_name: str,
+                                system_prompt: str, user_prompt: str,
+                                domain_id: str = "") -> list[dict]:
     """전체 트랜스크립트를 GPT로 병렬 교정"""
-    cp = cache_path_for(video_name, "corrected")
+    cache_key = make_cache_key(video_name, STT_PROVIDER, CORRECTION_MODEL,
+                               "corrected", extra=domain_id)
+    cp = OUTPUT_DIR / f"{cache_key}.json"
     if cp.exists():
         print(f"  [캐시] 교정본: {cp.name}")
         return json.loads(cp.read_text(encoding="utf-8"))
@@ -486,7 +449,8 @@ def correct_transcript_parallel(raw_segments: list[dict], video_name: str) -> li
         futures = {}
         for idx, (start_i, chunk) in enumerate(chunks):
             label = f"세그먼트 {start_i+1}-{start_i+len(chunk)}"
-            future = executor.submit(_correct_chunk, chunk, label)
+            future = executor.submit(_correct_chunk, chunk, label,
+                                     system_prompt, user_prompt)
             futures[future] = idx
 
         for future in as_completed(futures):
@@ -930,18 +894,41 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
             if cp.exists():
                 raw_segments = json.loads(cp.read_text(encoding="utf-8"))
         if raw_segments:
-            print(f"\n[교정] {CORRECTION_MODEL} 교정")
-            corrected_segments = correct_transcript_parallel(raw_segments, video_name)
+            # 도메인 감지
+            if DOMAIN_DETECTION == "auto":
+                domain = detect_domain(
+                    raw_segments, openai_client,
+                    cache_dir=OUTPUT_DIR, video_stem=video_name,
+                    stt_provider=STT_PROVIDER,
+                )
+            elif DOMAIN_DETECTION == "generic":
+                domain = DomainMatch("generic", 0.0, *_load_domain_prompts("generic"))
+            else:
+                domain = DomainMatch(
+                    DOMAIN_DETECTION, 1.0, *_load_domain_prompts(DOMAIN_DETECTION)
+                )
+            print(f"\n[교정] {CORRECTION_MODEL} 교정 | 도메인: {domain.domain_id}"
+                  f" (신뢰도: {domain.confidence:.3f})")
+            corrected_segments = correct_transcript_parallel(
+                raw_segments, video_name,
+                domain.system_prompt, domain.user_prompt, domain.domain_id,
+            )
         else:
-            print(f"\n[교정] 건너뜀 — raw transcript 없음")
+            print("\n[교정] 건너뜀 — raw transcript 없음")
 
     # 4. 강의 요약 생성
     if run_all or "summary" in stages:
         # corrected transcript 캐시에서 로드 (이전 단계를 건너뛴 경우)
         if not corrected_segments:
-            cp = cache_path_for(video_name, "corrected")
-            if cp.exists():
-                corrected_segments = json.loads(cp.read_text(encoding="utf-8"))
+            # 도메인별 캐시 키가 다를 수 있으므로 glob으로 검색
+            candidates = sorted(
+                OUTPUT_DIR.glob(f"{video_name}_corrected_*.json"),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            )
+            if candidates:
+                corrected_segments = json.loads(
+                    candidates[0].read_text(encoding="utf-8")
+                )
         if corrected_segments:
             print(f"\n[요약] 강의 요약 생성")
             summary = generate_lecture_summary(corrected_segments, video_name)
@@ -982,7 +969,8 @@ def main():
 
     print("=" * 70)
     print("MP4 스크립트 추출 & GPT 교정 파이프라인 v2")
-    print(f"  STT: {STT_PROVIDER} | 교정: {CORRECTION_MODEL} | 워커: {MAX_WORKERS}")
+    print(f"  STT: {STT_PROVIDER} | 교정: {CORRECTION_MODEL} | 워커: {MAX_WORKERS}"
+          f" | 도메인: {DOMAIN_DETECTION}")
     if stages:
         print(f"  실행 단계: {', '.join(sorted(stages))}")
     print("=" * 70)

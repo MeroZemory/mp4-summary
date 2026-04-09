@@ -20,6 +20,9 @@ dist/
 # Output data (mp3, transcripts, summaries)
 output/
 
+# Domain embedding cache
+embeddings_cache/
+
 # macOS
 .DS_Store
 

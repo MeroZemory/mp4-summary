@@ -80,11 +80,35 @@ output/
 
 ### Key Features
 
+- **Automatic domain detection** — HyQE-based keyword embedding matching selects the optimal correction prompt per video (see below)
 - **Parallel processing** — ThreadPoolExecutor (default 20 workers)
 - **Caching** — Config-aware MD5 hashing to prevent redundant API calls
 - **Auto-fallback** — Automatic switch from ElevenLabs to Whisper on failure
 - **Retry with backoff** — Rate limit: 30s × attempt, general: 5-10s
 - **Large file handling** — Auto-splits into 10-min chunks when exceeding API size limits
+
+### Domain Detection
+
+The pipeline automatically detects the lecture domain and selects the most suitable correction prompt. This uses a HyQE-inspired approach:
+
+1. **Sample** — Select ~20 segments from the raw STT output (first 15 + 5 from middle)
+2. **Extract keywords** — `gpt-4.1-nano` extracts 15-25 domain-indicative keywords (<$0.001)
+3. **Embed & compare** — Keywords are embedded via `text-embedding-3-small` and compared against pre-computed domain signature embeddings using cosine similarity
+4. **Select prompt** — If similarity exceeds the threshold (default 0.45), the domain-specific prompt is used; otherwise, a generic prompt is applied
+
+Detection results are cached per video, so API calls happen only once.
+
+**Configuration via `DOMAIN_DETECTION` env var:**
+- `auto` (default) — Automatic detection
+- `generic` — Always use generic prompt
+- `pharmaceutical` — Force a specific domain
+
+**Adding a new domain:**
+
+1. Create `prompts/{domain_id}/system.md` and `user.md` with domain-specific correction instructions
+2. Add an entry to `prompts/domains.json` with `id` and ~30-40 representative `keywords`
+3. Run `python domain_detector.py --precompute` to generate the domain embedding
+4. Done — the pipeline will automatically consider the new domain
 
 ## 2. Viewer Web App (`viewer/`)
 
@@ -220,6 +244,11 @@ qa_insights        # Learning notes (pending/accepted/dismissed)
 ```
 mp4-summary/
 ├── extract_and_correct.py    # Main pipeline script
+├── domain_detector.py        # HyQE-based domain detection
+├── prompts/                  # Correction prompt registry
+│   ├── domains.json          # Domain definitions + keywords
+│   ├── generic/              # Fallback prompts
+│   └── pharmaceutical/       # Domain-specific prompts
 ├── output/                   # Pipeline output (JSON, MD, MP3)
 └── viewer/                   # Web viewer
     ├── Dockerfile

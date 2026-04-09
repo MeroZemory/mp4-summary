@@ -1,0 +1,23 @@
+{
+  "domains": [
+    {
+      "id": "pharmaceutical",
+      "name": "Pharmaceutical / Biomedical Sciences",
+      "keywords": [
+        "drug discovery", "drug development", "pharmacogenomics",
+        "CYP450", "CYP2D6", "cytochrome P450", "ADMET",
+        "pharmacokinetics", "pharmacodynamics", "clinical trials",
+        "FDA approval", "molecular docking", "QSAR",
+        "drug target", "protein binding", "IC50", "EC50",
+        "sorafenib", "imatinib", "kinase inhibitor",
+        "EGFR", "HER2", "Wnt pathway", "beta-catenin",
+        "drug metabolism", "drug resistance", "adverse effect",
+        "bioavailability", "therapeutic index", "drug repurposing",
+        "high-throughput screening", "lead optimization",
+        "preclinical", "phase I", "phase II", "phase III"
+      ]
+    }
+  ],
+  "embedding_model": "text-embedding-3-small",
+  "similarity_threshold": 0.45
+}
