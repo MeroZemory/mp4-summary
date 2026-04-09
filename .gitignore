@@ -1,0 +1,28 @@
+# Environment variables (API keys)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+dist/
+.vite/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Output data (mp3, transcripts, summaries)
+output/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

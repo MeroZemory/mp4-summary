@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: viewer
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: viewer
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: pg_isready -U viewer
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  viewer:
+    build:
+      context: ..
+      dockerfile: viewer/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://viewer:${DB_PASSWORD}@db:5432/viewer
+      JWT_SECRET: ${JWT_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-claude-sonnet-4-6}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

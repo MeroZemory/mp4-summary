@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #f8f9fa;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Scrollbar */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+/* Selection */
+::selection {
+  background: rgba(13, 148, 136, 0.2);
+}
+/* Selection on dark/teal backgrounds */
+.bg-teal-600 ::selection,
+.bg-teal-600::selection {
+  background: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid rgba(13, 148, 136, 0.5);
+  outline-offset: 2px;
+}
+
+/* Segment hover */
+.seg-row {
+  transition: background-color 80ms ease;
+}
+.seg-row:hover {
+  background-color: rgba(13, 148, 136, 0.04);
+}
+
+/* Segment highlight animation (timestamp click) */
+.seg-highlight {
+  animation: seg-flash 1.5s ease-out;
+}
+@keyframes seg-flash {
+  0% { background-color: rgba(13, 148, 136, 0.18); }
+  100% { background-color: transparent; }
+}
+
+/* Mermaid diagrams — fill width, JS controls max-width for tall diagrams */
+.mermaid-wide svg {
+  height: auto !important;
+}
+
+/* Toast slide-up animation */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-up {
+  animation: slide-up 0.25s ease-out;
+}
+
+/* Chat markdown — tighter spacing inside bubbles */
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}

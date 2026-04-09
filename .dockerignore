@@ -1,0 +1,7 @@
+viewer/frontend/node_modules
+viewer/frontend/dist
+viewer/frontend/.vite
+viewer/__pycache__
+viewer/backend/__pycache__
+**/.DS_Store
+# mp3 files needed for audio playback
