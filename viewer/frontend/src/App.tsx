@@ -2530,6 +2530,7 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [summaryCollapsed, setSummaryCollapsed] = useState(false)
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(true)
   const [chatOpen, setChatOpen] = useState(false)
   const [currentUser, setCurrentUser] = useState<{ email: string; display_name: string | null } | null>(null)
 
@@ -2607,6 +2608,7 @@ export default function App() {
     setViewMode('corrected')
     setSidebarOpen(false)
     setSummaryCollapsed(false)
+    setTranscriptCollapsed(true)
     setContextMenu(null)
     setBookmarkAddDialog(null)
     setBookmarkPopover(null)
@@ -2832,14 +2834,29 @@ export default function App() {
 
           {/* Transcript section header — divider + controls */}
           <div className="shrink-0 px-5 py-2 bg-slate-50/80 border-y border-slate-200/80 flex items-center gap-2">
-            <span className="text-[11px] font-medium text-slate-400 mr-auto">
+            <button
+              onClick={() => setTranscriptCollapsed((v) => !v)}
+              className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 hover:text-slate-700 mr-auto transition-colors"
+              aria-expanded={!transcriptCollapsed}
+            >
+              <svg
+                className={`w-3 h-3 transition-transform ${transcriptCollapsed ? '' : 'rotate-90'}`}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2.5}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M9 18l6-6-6-6" />
+              </svg>
               녹취록 &middot; {filtered.length}개 세그먼트
               {contentSearch && viewMode !== 'json' && (
                 <span className="text-yellow-600 ml-2">
                   &ldquo;{contentSearch}&rdquo; 검색 중
                 </span>
               )}
-            </span>
+            </button>
 
             {/* Corrected / Raw / JSON segmented control */}
             <div className="hidden sm:flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
@@ -2927,7 +2944,7 @@ export default function App() {
           </div>
 
           {/* JSON view */}
-          {viewMode === 'json' ? (
+          {transcriptCollapsed ? null : viewMode === 'json' ? (
             <pre className="p-6 text-[12px] font-mono leading-relaxed text-emerald-400/90 bg-[#0f1419] min-h-full selection:bg-emerald-900/40">
               {JSON.stringify(activeFile.data, null, 2)}
             </pre>
