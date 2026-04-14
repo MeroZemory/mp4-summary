@@ -4,16 +4,23 @@ Usage: uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+# 파이프라인 스크립트 import를 위해 프로젝트 루트(PROJECT_ROOT)를 sys.path에 추가
+_PROJECT_ROOT = os.environ.get("PROJECT_ROOT")
+if _PROJECT_ROOT and _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from auth import COOKIE_NAME, GOOGLE_CLIENT_ID, decode_token, router as auth_router
 from bookmarks import router as bookmarks_router
 from chat import router as chat_router
 from db import close_pool, run_migrations
+from jobs import create_worker_manager, router as jobs_router
 from lecture_data import load_lecture_data
 from qa_extraction import router as insights_router
 
@@ -31,15 +38,23 @@ DIST = os.environ.get("DIST_DIR") or (
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     database_url = os.environ.get("DATABASE_URL", "")
+    worker_manager = None
     if database_url:
         print("[서버] DB 마이그레이션 실행 중...")
         await run_migrations()
         print("[서버] DB 준비 완료")
+        worker_manager = create_worker_manager()
+        await worker_manager.start()
+        _app.state.worker_manager = worker_manager
     else:
-        print("[서버] DATABASE_URL 미설정 — DB 없이 실행")
+        print("[서버] DATABASE_URL 미설정 — DB/워커 없이 실행")
     load_lecture_data()
-    yield
-    await close_pool()
+    try:
+        yield
+    finally:
+        if worker_manager is not None:
+            await worker_manager.stop()
+        await close_pool()
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -50,6 +65,7 @@ app.include_router(auth_router)
 app.include_router(bookmarks_router)
 app.include_router(chat_router)
 app.include_router(insights_router)
+app.include_router(jobs_router)
 
 
 # ── Login / Register pages (server-rendered HTML) ──

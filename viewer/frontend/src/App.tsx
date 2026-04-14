@@ -2517,6 +2517,258 @@ function InsightsPanel({
   )
 }
 
+// ─── Upload Panel (sidebar section) ─────────────────────
+
+type JobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'canceled'
+type Job = {
+  id: string
+  filename: string
+  original_name: string
+  file_size: number | null
+  lecture_id: string | null
+  status: JobStatus
+  stage: string | null
+  progress_message: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  processing_ms: number | null
+}
+
+const TERMINAL_STATUSES: ReadonlySet<JobStatus> = new Set(['completed', 'failed', 'canceled'])
+
+function formatSize(bytes: number | null): string {
+  if (!bytes) return ''
+  const mb = bytes / (1024 * 1024)
+  if (mb < 1024) return `${mb.toFixed(0)}MB`
+  return `${(mb / 1024).toFixed(1)}GB`
+}
+
+function UploadPanel() {
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [expanded, setExpanded] = useState(true)
+  const [uploading, setUploading] = useState(0)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState(false)
+  const [completedSinceLoad, setCompletedSinceLoad] = useState(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const knownCompletedRef = useRef<Set<string>>(new Set())
+  const initialLoadRef = useRef(true)
+
+  const loadJobs = useCallback(async () => {
+    try {
+      const res = await fetch('/api/jobs')
+      if (!res.ok) return
+      const data: Job[] = await res.json()
+      setJobs(data)
+      // 초기 로드의 completed는 새 완료로 카운트하지 않음
+      const nextCompletedSet = new Set(knownCompletedRef.current)
+      let newCompletions = 0
+      for (const j of data) {
+        if (j.status === 'completed' && !nextCompletedSet.has(j.id)) {
+          nextCompletedSet.add(j.id)
+          if (!initialLoadRef.current) newCompletions += 1
+        }
+      }
+      knownCompletedRef.current = nextCompletedSet
+      if (newCompletions > 0) {
+        setCompletedSinceLoad((n) => n + newCompletions)
+      }
+      initialLoadRef.current = false
+    } catch {
+      /* 네트워크 오류 무시 — 다음 폴링에서 재시도 */
+    }
+  }, [])
+
+  // 최초 로드 + 활성 job 있을 때 5초 폴링
+  useEffect(() => {
+    loadJobs()
+  }, [loadJobs])
+
+  useEffect(() => {
+    const hasActive = jobs.some((j) => !TERMINAL_STATUSES.has(j.status))
+    if (!hasActive) return
+    const id = setInterval(loadJobs, 5000)
+    return () => clearInterval(id)
+  }, [jobs, loadJobs])
+
+  const handleFiles = useCallback(async (files: FileList | File[]) => {
+    setUploadError(null)
+    const list = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.mp4'))
+    if (list.length === 0) {
+      setUploadError('MP4 파일만 업로드할 수 있습니다')
+      return
+    }
+    setUploading((n) => n + list.length)
+    for (const file of list) {
+      try {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await fetch('/api/jobs/upload', { method: 'POST', body: form })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          setUploadError(err.detail || `${file.name}: 업로드 실패`)
+        }
+      } catch (e) {
+        setUploadError(`${file.name}: 네트워크 오류`)
+      } finally {
+        setUploading((n) => Math.max(0, n - 1))
+      }
+    }
+    await loadJobs()
+  }, [loadJobs])
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    if (e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files)
+    }
+  }, [handleFiles])
+
+  const cancelJob = useCallback(async (jobId: string) => {
+    try {
+      await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
+      await loadJobs()
+    } catch {}
+  }, [loadJobs])
+
+  const activeCount = jobs.filter((j) => !TERMINAL_STATUSES.has(j.status)).length
+  const displayJobs = jobs.slice(0, 8)
+
+  return (
+    <div className="border-t border-slate-100">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-50/60 transition-colors"
+      >
+        <ChevronDownIcon
+          className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`}
+        />
+        <span className="text-[12px] font-semibold text-slate-600">MP4 업로드</span>
+        {activeCount > 0 && (
+          <span className="ml-auto bg-teal-500 text-white text-[10px] rounded-full min-w-[18px] px-1.5 py-0.5 inline-flex items-center justify-center font-semibold leading-none">
+            {activeCount}
+          </span>
+        )}
+      </button>
+
+      {expanded && (
+        <div className="px-2 pb-3 space-y-2">
+          {/* Drop zone */}
+          <div
+            onDrop={onDrop}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+            onDragLeave={() => setDragOver(false)}
+            onClick={() => fileInputRef.current?.click()}
+            className={`border-2 border-dashed rounded-lg px-3 py-4 text-center cursor-pointer transition-colors ${
+              dragOver
+                ? 'border-teal-400 bg-teal-50'
+                : 'border-slate-200 hover:border-teal-300 hover:bg-slate-50'
+            }`}
+          >
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              MP4 파일을<br />드래그하거나 클릭
+            </p>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="video/mp4,.mp4"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) handleFiles(e.target.files)
+                e.target.value = ''
+              }}
+            />
+          </div>
+
+          {uploading > 0 && (
+            <p className="text-[11px] text-teal-600 text-center">
+              업로드 중... ({uploading}개 남음)
+            </p>
+          )}
+          {uploadError && (
+            <p className="text-[11px] text-red-500 break-words">{uploadError}</p>
+          )}
+
+          {completedSinceLoad > 0 && (
+            <div className="rounded-md bg-amber-50 border border-amber-200 px-2.5 py-2 flex items-start gap-2">
+              <p className="text-[11px] text-amber-800 leading-snug flex-1">
+                새 강의 {completedSinceLoad}개 완료. 목록에 반영하려면 새로고침하세요.
+              </p>
+              <button
+                onClick={() => window.location.reload()}
+                className="shrink-0 text-[11px] font-semibold text-amber-700 hover:text-amber-900 underline"
+              >
+                새로고침
+              </button>
+            </div>
+          )}
+
+          {/* Job list */}
+          {displayJobs.length > 0 && (
+            <div className="space-y-1">
+              {displayJobs.map((job) => {
+                const isFailed = job.status === 'failed'
+                const isDone = job.status === 'completed'
+                return (
+                  <div
+                    key={job.id}
+                    className="rounded-md border border-slate-100 bg-slate-50/40 px-2.5 py-2"
+                  >
+                    <div className="flex items-start gap-1.5">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] font-medium text-slate-700 truncate" title={job.original_name}>
+                          {job.original_name}
+                        </p>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span
+                            className={`inline-block w-1.5 h-1.5 rounded-full ${
+                              isDone ? 'bg-teal-500'
+                              : isFailed ? 'bg-red-500'
+                              : job.status === 'processing' ? 'bg-amber-500 animate-pulse'
+                              : job.status === 'canceled' ? 'bg-slate-300'
+                              : 'bg-slate-400'
+                            }`}
+                          />
+                          <span className="text-[10px] text-slate-500">
+                            {job.status === 'queued' && '대기 중'}
+                            {job.status === 'processing' && (job.progress_message || '처리 중')}
+                            {job.status === 'completed' && `완료 · ${formatSize(job.file_size)}`}
+                            {job.status === 'failed' && '실패'}
+                            {job.status === 'canceled' && '취소됨'}
+                          </span>
+                        </div>
+                        {isFailed && job.error_message && (
+                          <p className="text-[10px] text-red-500 mt-1 line-clamp-2" title={job.error_message}>
+                            {job.error_message}
+                          </p>
+                        )}
+                      </div>
+                      {job.status === 'queued' && (
+                        <button
+                          onClick={() => cancelJob(job.id)}
+                          className="shrink-0 p-0.5 rounded text-slate-300 hover:text-red-500 transition-colors"
+                          title="취소"
+                        >
+                          <XIcon />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 // ─── App ────────────────────────────────────────────────
 
 export default function App() {
@@ -3128,6 +3380,9 @@ export default function App() {
               </div>
             )}
           </nav>
+
+          {/* Upload panel */}
+          <UploadPanel />
 
           {/* Bookmarks panel */}
           <BookmarksPanel

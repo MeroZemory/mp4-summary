@@ -7,3 +7,4 @@ bcrypt
 httpx
 pydantic[email]
 anthropic
+openai

@@ -30,6 +30,21 @@ services:
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-https://lecture.agentryx-ai.com/api/auth/google/callback}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-claude-sonnet-4-6}
+      # 파이프라인 관련
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      STT_PROVIDER: ${STT_PROVIDER:-elevenlabs}
+      CORRECTION_MODEL: ${CORRECTION_MODEL:-gpt-5.4}
+      DOMAIN_DETECTION: ${DOMAIN_DETECTION:-auto}
+      MAX_WORKERS: ${MAX_WORKERS:-20}
+      # 업로드 처리 워커 풀
+      WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-30}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-5}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-8589934592}
+    volumes:
+      - ../downloads:/project/downloads
+      - ../output:/project/output
+      - ../embeddings_cache:/project/embeddings_cache
     ports:
       - "8000:8000"
     restart: unless-stopped

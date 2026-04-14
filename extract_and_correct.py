@@ -39,13 +39,18 @@ def load_env(env_path: Path) -> dict[str, str]:
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENV = load_env(SCRIPT_DIR / ".env")
 
-OPENAI_API_KEY = ENV.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-ELEVENLABS_API_KEY = ENV.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVENLABS_API_KEY", "")
-STT_PROVIDER = ENV.get("STT_PROVIDER", "elevenlabs")  # "elevenlabs" or "whisper"
-MAX_WORKERS = int(ENV.get("MAX_WORKERS", "20"))
-CORRECTION_MODEL = ENV.get("CORRECTION_MODEL", "gpt-5.4")
-ANTHROPIC_API_KEY = ENV.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-DOMAIN_DETECTION = ENV.get("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
+def _cfg(key: str, default: str = "") -> str:
+    """ENV(.env) → os.environ 순으로 조회"""
+    return ENV.get(key) or os.environ.get(key, default)
+
+
+OPENAI_API_KEY = _cfg("OPENAI_API_KEY")
+ELEVENLABS_API_KEY = _cfg("ELEVENLABS_API_KEY")
+STT_PROVIDER = _cfg("STT_PROVIDER", "elevenlabs")  # "elevenlabs" or "whisper"
+MAX_WORKERS = int(_cfg("MAX_WORKERS", "20"))
+CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4")
+ANTHROPIC_API_KEY = _cfg("ANTHROPIC_API_KEY")
+DOMAIN_DETECTION = _cfg("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY를 찾을 수 없습니다. .env를 확인하세요.")
