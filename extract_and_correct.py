@@ -58,11 +58,8 @@ REFERENCES_DIR = BASE_DIR / "references"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MP4_FILES = [
-    REFERENCES_DIR / "제약AI강의" / "Drug discovery and development.mp4",
-    REFERENCES_DIR / "제약AI강의" / "Drug target prediction and drug.mp4",
-    REFERENCES_DIR / "Drug discovery and development2.mp4",
-]
+DOWNLOADS_DIR = SCRIPT_DIR / "downloads"
+MP4_FILES = sorted(DOWNLOADS_DIR.glob("*.mp4")) if DOWNLOADS_DIR.exists() else []
 
 # ElevenLabs 파일 크기 제한
 ELEVENLABS_MAX_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
@@ -955,6 +952,8 @@ def main():
                         help="실행할 단계 (미지정 시 전체). 예: --stages summary")
     parser.add_argument("--refresh-summary", action="store_true",
                         help="기존 요약 캐시를 삭제하고 재생성")
+    parser.add_argument("--parallel", type=int, default=1, metavar="N",
+                        help="동시에 처리할 영상 수 (기본: 1)")
     args = parser.parse_args()
 
     stages = set(args.stages) if args.stages else None
@@ -985,10 +984,32 @@ def main():
         size_mb = f.stat().st_size / (1024 * 1024)
         print(f"  - {f.name} ({size_mb:.0f}MB)")
 
-    results = []
-    for mp4_path in valid_files:
-        result = process_single_video(mp4_path, stages)
-        results.append(result)
+    parallel = args.parallel
+    if parallel > 1:
+        print(f"\n병렬 처리: {parallel}개 영상 동시 진행")
+        results_map = {}
+        with ThreadPoolExecutor(max_workers=parallel) as executor:
+            futures = {
+                executor.submit(process_single_video, mp4, stages): i
+                for i, mp4 in enumerate(valid_files)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results_map[idx] = future.result()
+                except Exception as e:
+                    print(f"\n[오류] {valid_files[idx].name}: {e}")
+                    results_map[idx] = {
+                        "video": valid_files[idx].name,
+                        "raw_segments": [], "corrected_segments": [],
+                        "summary": {}, "processing_time": 0,
+                    }
+        results = [results_map[i] for i in range(len(valid_files))]
+    else:
+        results = []
+        for mp4_path in valid_files:
+            result = process_single_video(mp4_path, stages)
+            results.append(result)
 
     # 통합 결과 JSON
     summary_path = OUTPUT_DIR / (make_cache_key("all", STT_PROVIDER, CORRECTION_MODEL, "transcripts") + ".json")
