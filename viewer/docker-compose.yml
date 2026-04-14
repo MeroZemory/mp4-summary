@@ -27,6 +27,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-https://lecture.agentryx-ai.com/api/auth/google/callback}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-claude-sonnet-4-6}
     ports:
