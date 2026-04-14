@@ -221,7 +221,7 @@ def _generic_match() -> DomainMatch:
 
 
 def _cache_key(video_stem: str, stt_provider: str) -> str:
-    return f"{video_stem}_domain_{stt_provider}"
+    return f".domain_cache_{video_stem}_{stt_provider}"
 
 
 def _load_cache(cache_dir: Path, video_stem: str, stt_provider: str) -> dict | None:
