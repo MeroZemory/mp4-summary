@@ -858,21 +858,29 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
 
 # ── 메인 파이프라인 ───────────────────────────────────────────────────────────
 
-def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict:
+def process_single_video(
+    mp4_path: Path,
+    stages: set[str] | None = None,
+    forced_domain_id: str | None = None,
+) -> dict:
     """단일 비디오 처리. stages가 None이면 전체, 아니면 지정 단계만 실행.
-    stages: {"audio", "stt", "correct", "summary"} 중 선택"""
+    stages: {"audio", "stt", "correct", "summary"} 중 선택.
+    forced_domain_id: 코렉션 단계에서 자동 감지를 건너뛰고 강제로 사용할 도메인 ID."""
     run_all = stages is None
     video_name = mp4_path.stem
     print(f"\n{'='*70}")
     print(f"처리 시작: {mp4_path.name}")
     stage_names = "전체" if run_all else ", ".join(sorted(stages))
     print(f"  STT: {STT_PROVIDER} | 교정: {CORRECTION_MODEL} | 단계: {stage_names}")
+    if forced_domain_id:
+        print(f"  강제 도메인: {forced_domain_id}")
     print(f"{'='*70}")
 
     start_time = time.time()
     raw_segments = []
     corrected_segments = []
     summary = {}
+    detected_match: DomainMatch | None = None
 
     # 1. 오디오 추출
     if run_all or "audio" in stages:
@@ -888,6 +896,20 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
         else:
             print(f"\n[STT] 건너뜀 — 오디오 파일 없음 ({video_name}.mp3)")
 
+        # STT 직후 도메인 감지 (auto 모드 + 강제 도메인이 없을 때)
+        if raw_segments and forced_domain_id is None and DOMAIN_DETECTION == "auto":
+            try:
+                detected_match = detect_domain(
+                    raw_segments, openai_client,
+                    cache_dir=OUTPUT_DIR, video_stem=video_name,
+                    stt_provider=STT_PROVIDER,
+                )
+                print(f"  [도메인 감지] {detected_match.domain_id}"
+                      f" (신뢰도: {detected_match.confidence:.3f})")
+            except Exception as e:
+                print(f"  [도메인 감지 실패] {e}")
+                detected_match = None
+
     # 3. GPT 교정
     if run_all or "correct" in stages:
         # raw transcript 캐시에서 로드 (stt 단계를 건너뛴 경우)
@@ -896,8 +918,13 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
             if cp.exists():
                 raw_segments = json.loads(cp.read_text(encoding="utf-8"))
         if raw_segments:
-            # 도메인 감지
-            if DOMAIN_DETECTION == "auto":
+            # 도메인 결정: forced > 사전 감지 결과 > DOMAIN_DETECTION 정책
+            if forced_domain_id:
+                _sys, _usr = _load_domain_prompts(forced_domain_id)
+                domain = DomainMatch(forced_domain_id, 1.0, _sys, _usr, [])
+            elif detected_match is not None:
+                domain = detected_match
+            elif DOMAIN_DETECTION == "auto":
                 domain = detect_domain(
                     raw_segments, openai_client,
                     cache_dir=OUTPUT_DIR, video_stem=video_name,
@@ -946,6 +973,17 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
         "corrected_segments": corrected_segments,
         "summary": summary,
         "processing_time": elapsed,
+        "detected_domain": (
+            {
+                "domain_id": detected_match.domain_id,
+                "confidence": detected_match.confidence,
+                "candidates": [
+                    {"domain_id": d, "score": s} for d, s in detected_match.candidates
+                ],
+            }
+            if detected_match is not None
+            else None
+        ),
     }
 
 
