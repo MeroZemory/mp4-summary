@@ -7,6 +7,7 @@ STT 결과에서 키워드를 추출 → 임베딩 → 도메인 시그니처와
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -14,8 +15,8 @@ import openai
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 
-KEYWORD_MODEL = "gpt-4.1-nano"
-EMBEDDING_MODEL = "text-embedding-3-small"
+KEYWORD_MODEL = os.environ.get("DOMAIN_KEYWORD_MODEL", "gpt-4.1-nano")
+EMBEDDING_MODEL = os.environ.get("DOMAIN_EMBEDDING_MODEL", "text-embedding-3-small")
 SAMPLE_HEAD = 15
 SAMPLE_MIDDLE = 5
 

@@ -51,6 +51,7 @@ MAX_WORKERS = int(_cfg("MAX_WORKERS", "20"))
 CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4")
 ANTHROPIC_API_KEY = _cfg("ANTHROPIC_API_KEY")
 DOMAIN_DETECTION = _cfg("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
+LECTURE_NOTES_MODEL = _cfg("LECTURE_NOTES_MODEL", "claude-opus-4-6")  # 강의 노트 생성용 Anthropic 모델
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY를 찾을 수 없습니다. .env를 확인하세요.")
@@ -575,7 +576,7 @@ def _generate_notes_claude(transcript_text: str) -> str:
     for attempt in range(3):
         try:
             response = anthropic_client.messages.create(
-                model="claude-opus-4-6",
+                model=LECTURE_NOTES_MODEL,
                 max_tokens=16000,
                 system=system,
                 messages=[{"role": "user", "content": user}],
@@ -721,7 +722,7 @@ graph LR
     for attempt in range(3):
         try:
             response = anthropic_client.messages.create(
-                model="claude-opus-4-6",
+                model=LECTURE_NOTES_MODEL,
                 max_tokens=8000,
                 system=system,
                 messages=[{"role": "user", "content": user}],
@@ -793,7 +794,7 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
     transcript_text = "\n".join(f"[{s['time']}] {s['text']}" for s in corrected_segments)
     valid_times = [s["time"] for s in corrected_segments]
 
-    print(f"  요약 생성: 8개 섹션 병렬 처리 | 모델: {CORRECTION_MODEL} + Claude Opus 4.6")
+    print(f"  요약 생성: 8개 섹션 병렬 처리 | 모델: {CORRECTION_MODEL} + {LECTURE_NOTES_MODEL}")
 
     # 8개 섹션 병렬 생성
     results = {}

@@ -30,8 +30,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = Path(os.environ.get("LECTURE_DATA_DIR", PROJECT_ROOT / "output"))
 SAMPLE_HEAD = 15
 SAMPLE_MIDDLE = 5
-KEYWORD_MODEL = "gpt-4.1-nano"
-DRAFT_MODEL = "gpt-5.4"
+KEYWORD_MODEL = os.environ.get("DOMAIN_KEYWORD_MODEL", "gpt-4.1-nano")
+DRAFT_MODEL = os.environ.get("DOMAIN_DRAFT_MODEL", "gpt-5.4")
 
 
 def _load_api_key() -> str:
