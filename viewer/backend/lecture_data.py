@@ -100,3 +100,12 @@ def get_lecture_ids() -> list[str]:
 
 def get_lecture(lecture_id: str) -> dict | None:
     return LECTURE_DATA.get(lecture_id)
+
+
+def lecture_artifacts(lecture_id: str) -> dict:
+    """API 응답용 — 강의의 코렉션/요약 보유 여부."""
+    data = LECTURE_DATA.get(lecture_id) or {}
+    return {
+        "has_corrected": bool(data.get("corrected")),
+        "has_summary": bool(data.get("summary")),
+    }
