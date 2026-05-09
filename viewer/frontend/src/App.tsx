@@ -2546,6 +2546,7 @@ function LectureDomainBadge({ lecture, domains, onConfirm }: LectureDomainBadgeP
 
   const isPending = lecture.domain_status === 'pending'
   const isAwaiting = lecture.latest_job_status === 'awaiting_domain'
+  const isMigrated = lecture.domain_source === 'migration'
 
   const handleConfirm = async (domainId: string) => {
     if (domainId === lecture.domain_id && !isPending && !isAwaiting) {
@@ -2568,6 +2569,19 @@ function LectureDomainBadge({ lecture, domains, onConfirm }: LectureDomainBadgeP
     } finally {
       setBusy(false)
     }
+  }
+
+  if (isMigrated) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium bg-slate-50 text-slate-500 border-slate-200"
+        title="마이그레이션된 강의는 도메인 변경(재코렉션)을 지원하지 않습니다"
+      >
+        <span>🏷</span>
+        <span>{labelOf(lecture.domain_id)}</span>
+        <span className="text-slate-300 text-[10px]">migrated</span>
+      </span>
+    )
   }
 
   return (

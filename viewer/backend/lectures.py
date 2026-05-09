@@ -239,8 +239,14 @@ async def confirm_domain(
                     lecture_id, user_id,
                 )
                 if ref is None:
+                    if row["domain_source"] == "migration":
+                        raise HTTPException(
+                            409,
+                            "마이그레이션된 강의는 도메인 변경(재코렉션)을 지원하지 않습니다",
+                        )
                     raise HTTPException(
-                        409, "이 강의의 원본 업로드 정보를 찾을 수 없어 코렉션을 큐잉할 수 없습니다",
+                        409,
+                        "이 강의의 원본 업로드 정보를 찾을 수 없어 코렉션을 큐잉할 수 없습니다",
                     )
                 queued_row = await conn.fetchrow(
                     """
