@@ -48,10 +48,10 @@ OPENAI_API_KEY = _cfg("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = _cfg("ELEVENLABS_API_KEY")
 STT_PROVIDER = _cfg("STT_PROVIDER", "elevenlabs")  # "elevenlabs" or "whisper"
 MAX_WORKERS = int(_cfg("MAX_WORKERS", "20"))
-CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4")
+CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4-mini")
 ANTHROPIC_API_KEY = _cfg("ANTHROPIC_API_KEY")
 DOMAIN_DETECTION = _cfg("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
-LECTURE_NOTES_MODEL = _cfg("LECTURE_NOTES_MODEL", "claude-opus-4-6")  # 강의 노트 생성용 Anthropic 모델
+LECTURE_NOTES_MODEL = _cfg("LECTURE_NOTES_MODEL", "claude-opus-4-7")  # 강의 노트 생성용 Anthropic 모델
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY를 찾을 수 없습니다. .env를 확인하세요.")
