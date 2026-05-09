@@ -2,6 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+import { DomainPicker } from './components/DomainPicker'
+import {
+  groupLecturesByDomain,
+  postLectureDomain,
+  type DomainInfo,
+  type Lecture,
+} from './hooks/useLectures'
+
 // ─── Types ──────────────────────────────────────────────
 
 type TranscriptSegment = { time: string; text: string }
@@ -2517,9 +2525,227 @@ function InsightsPanel({
   )
 }
 
+// ─── Lecture Domain Badge (강의 페이지 헤더) ─────────────
+
+interface LectureDomainBadgeProps {
+  lecture: Lecture | null
+  domains: DomainInfo[]
+  onConfirm: (domainId: string) => Promise<void>
+}
+
+function LectureDomainBadge({ lecture, domains, onConfirm }: LectureDomainBadgeProps) {
+  const [editing, setEditing] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  if (!lecture) return null
+
+  const labelOf = (id: string | null | undefined) => {
+    if (!id) return '미분류'
+    return domains.find((d) => d.id === id)?.name || id
+  }
+
+  const isPending = lecture.domain_status === 'pending'
+  const isAwaiting = lecture.latest_job_status === 'awaiting_domain'
+
+  const handleConfirm = async (domainId: string) => {
+    if (domainId === lecture.domain_id && !isPending && !isAwaiting) {
+      setEditing(false)
+      return
+    }
+    if (
+      lecture.domain_id &&
+      domainId !== lecture.domain_id &&
+      !confirm(
+        '도메인을 바꾸면 코렉션과 요약이 다시 생성됩니다. 진행하시겠습니까?',
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    try {
+      await onConfirm(domainId)
+      setEditing(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setEditing((v) => !v)}
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium transition ${
+          isPending
+            ? 'bg-amber-50 text-amber-700 border-amber-200 hover:border-amber-300'
+            : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300'
+        }`}
+        title="도메인 변경"
+      >
+        <span>🏷</span>
+        <span>{labelOf(lecture.domain_id)}</span>
+        <span className="text-slate-400">▾</span>
+      </button>
+      {editing && (
+        <div className="absolute z-30 mt-2 left-0 min-w-[260px]">
+          <DomainPicker
+            domains={domains}
+            recommendedId={lecture.detected_domain_id}
+            recommendedConfidence={lecture.detected_confidence}
+            topCandidates={lecture.detected_top_candidates}
+            currentDomainId={lecture.domain_id}
+            busy={busy}
+            onConfirm={handleConfirm}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Lecture Groups (sidebar section) ──────────────────
+
+type LectureGroupView = ReturnType<typeof groupLecturesByDomain>[number]
+
+interface LectureGroupsProps {
+  groups: LectureGroupView[]
+  entries: TranscriptEntry[]
+  search: string
+  selectedId: string
+  collapsedGroups: Set<string>
+  onToggleGroup: (key: string) => void
+  onSelect: (id: string) => void
+}
+
+function LectureGroups({
+  groups,
+  entries,
+  search,
+  selectedId,
+  collapsedGroups,
+  onToggleGroup,
+  onSelect,
+}: LectureGroupsProps) {
+  const entryById = useMemo(() => {
+    const m = new Map<string, TranscriptEntry>()
+    for (const e of entries) m.set(e.id, e)
+    return m
+  }, [entries])
+
+  const q = search.trim().toLowerCase()
+
+  const filteredGroups = useMemo(() => {
+    if (!q) return groups
+    return groups
+      .map((g) => ({
+        ...g,
+        lectures: g.lectures.filter((l) => {
+          const label = (entryById.get(l.id)?.label ?? l.original_name).toLowerCase()
+          return label.includes(q) || l.original_name.toLowerCase().includes(q)
+        }),
+      }))
+      .filter((g) => g.lectures.length > 0)
+  }, [groups, q, entryById])
+
+  if (filteredGroups.length === 0) {
+    return (
+      <div className="px-4 py-8 text-center text-sm text-slate-400">
+        {q ? `"${search}" 결과 없음` : '아직 등록된 강의가 없습니다'}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {filteredGroups.map((group) => {
+        const isCollapsed = collapsedGroups.has(group.key)
+        return (
+          <div key={group.key}>
+            <button
+              type="button"
+              onClick={() => onToggleGroup(group.key)}
+              className={`w-full flex items-center justify-between px-2 py-1 rounded text-[11px] font-semibold uppercase tracking-wider transition ${
+                group.isPending
+                  ? 'text-amber-700 hover:bg-amber-50'
+                  : group.isGeneric
+                  ? 'text-slate-500 hover:bg-slate-50'
+                  : 'text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="text-slate-400">{isCollapsed ? '▸' : '▾'}</span>
+                <span>{group.label}</span>
+                <span className="text-slate-400 font-normal">({group.lectures.length})</span>
+                {group.hasAwaitingConfirm && (
+                  <span title="컨펌 대기 중인 강의가 있습니다" className="text-amber-500">⚠</span>
+                )}
+              </span>
+            </button>
+            {!isCollapsed && (
+              <div className="mt-1 space-y-px">
+                {group.lectures.map((lec) => {
+                  const entry = entryById.get(lec.id)
+                  const label = entry?.label ?? lec.original_name.replace(/\.mp4$/i, '')
+                  const isActive = lec.id === selectedId
+                  const count = entry?.corrected?.segmentCount ?? entry?.raw?.segmentCount ?? 0
+                  const hasContent = !!entry
+                  const isAwaiting = lec.latest_job_status === 'awaiting_domain'
+                  const isProcessing =
+                    lec.latest_job_status === 'queued' ||
+                    lec.latest_job_status === 'processing'
+                  return (
+                    <button
+                      key={lec.id}
+                      onClick={() => onSelect(lec.id)}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-[13px] transition-all duration-100 ${
+                        isActive
+                          ? 'bg-teal-600 text-white font-medium shadow-sm shadow-teal-600/20'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
+                      }`}
+                      title={label}
+                    >
+                      <div className="truncate leading-snug">{label}</div>
+                      <div
+                        className={`flex items-center gap-2 text-[11px] mt-0.5 ${
+                          isActive ? 'text-teal-200' : 'text-slate-400'
+                        }`}
+                      >
+                        {hasContent && count > 0 && <span>{count}개 세그먼트</span>}
+                        {isAwaiting && (
+                          <span className={isActive ? 'text-amber-200' : 'text-amber-600'}>
+                            컨펌 대기
+                          </span>
+                        )}
+                        {isProcessing && (
+                          <span className={isActive ? 'text-teal-200' : 'text-slate-500'}>
+                            {lec.latest_job_type === 'stt' ? 'STT 진행 중'
+                              : lec.latest_job_type === 'correct' ? '코렉션 중'
+                              : lec.latest_job_type === 'summary' ? '요약 생성 중'
+                              : '처리 중'}
+                          </span>
+                        )}
+                        {!hasContent && !isAwaiting && !isProcessing && (
+                          <span className={isActive ? 'text-teal-200' : 'text-slate-400'}>
+                            (콘텐츠 미빌드)
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── Upload Panel (sidebar section) ─────────────────────
 
-type JobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'canceled'
+type JobStatus = 'queued' | 'processing' | 'awaiting_domain' | 'completed' | 'failed' | 'canceled'
+type JobType = 'full' | 'stt' | 'correct' | 'summary'
 type Job = {
   id: string
   filename: string
@@ -2528,6 +2754,8 @@ type Job = {
   lecture_id: string | null
   status: JobStatus
   stage: string | null
+  job_type: JobType
+  parent_job_id: string | null
   progress_message: string | null
   error_message: string | null
   created_at: string
@@ -2545,16 +2773,35 @@ function formatSize(bytes: number | null): string {
   return `${(mb / 1024).toFixed(1)}GB`
 }
 
-function UploadPanel() {
+interface UploadPanelProps {
+  lectures: Lecture[]
+  domains: DomainInfo[]
+  onConfirmDomain: (lectureId: string, domainId: string) => Promise<void>
+  onJobChanged: () => void
+}
+
+function UploadPanel({
+  lectures,
+  domains,
+  onConfirmDomain,
+  onJobChanged,
+}: UploadPanelProps) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [expanded, setExpanded] = useState(true)
   const [uploading, setUploading] = useState(0)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [completedSinceLoad, setCompletedSinceLoad] = useState(0)
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const knownCompletedRef = useRef<Set<string>>(new Set())
   const initialLoadRef = useRef(true)
+
+  const lectureById = useMemo(() => {
+    const m = new Map<string, Lecture>()
+    for (const l of lectures) m.set(l.id, l)
+    return m
+  }, [lectures])
 
   const loadJobs = useCallback(async () => {
     try {
@@ -2593,6 +2840,20 @@ function UploadPanel() {
     return () => clearInterval(id)
   }, [jobs, loadJobs])
 
+  const handleConfirm = useCallback(
+    async (lectureId: string, domainId: string) => {
+      setConfirmingId(lectureId)
+      try {
+        await onConfirmDomain(lectureId, domainId)
+        await loadJobs()
+        onJobChanged()
+      } finally {
+        setConfirmingId(null)
+      }
+    },
+    [onConfirmDomain, loadJobs, onJobChanged],
+  )
+
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setUploadError(null)
     const list = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.mp4'))
@@ -2617,7 +2878,8 @@ function UploadPanel() {
       }
     }
     await loadJobs()
-  }, [loadJobs])
+    onJobChanged()
+  }, [loadJobs, onJobChanged])
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -2713,6 +2975,13 @@ function UploadPanel() {
               {displayJobs.map((job) => {
                 const isFailed = job.status === 'failed'
                 const isDone = job.status === 'completed'
+                const isAwaiting = job.status === 'awaiting_domain'
+                const lec = job.lecture_id ? lectureById.get(job.lecture_id) : undefined
+                const stageLabel =
+                  job.job_type === 'stt'     ? 'STT'
+                  : job.job_type === 'correct' ? '코렉션'
+                  : job.job_type === 'summary' ? '요약'
+                  : ''
                 return (
                   <div
                     key={job.id}
@@ -2722,12 +2991,16 @@ function UploadPanel() {
                       <div className="flex-1 min-w-0">
                         <p className="text-[11px] font-medium text-slate-700 truncate" title={job.original_name}>
                           {job.original_name}
+                          {stageLabel && (
+                            <span className="ml-1 text-slate-400">· {stageLabel}</span>
+                          )}
                         </p>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <span
                             className={`inline-block w-1.5 h-1.5 rounded-full ${
                               isDone ? 'bg-teal-500'
                               : isFailed ? 'bg-red-500'
+                              : isAwaiting ? 'bg-amber-400'
                               : job.status === 'processing' ? 'bg-amber-500 animate-pulse'
                               : job.status === 'canceled' ? 'bg-slate-300'
                               : 'bg-slate-400'
@@ -2736,6 +3009,7 @@ function UploadPanel() {
                           <span className="text-[10px] text-slate-500">
                             {job.status === 'queued' && '대기 중'}
                             {job.status === 'processing' && (job.progress_message || '처리 중')}
+                            {isAwaiting && '도메인 컨펌 대기'}
                             {job.status === 'completed' && `완료 · ${formatSize(job.file_size)}`}
                             {job.status === 'failed' && '실패'}
                             {job.status === 'canceled' && '취소됨'}
@@ -2745,6 +3019,19 @@ function UploadPanel() {
                           <p className="text-[10px] text-red-500 mt-1 line-clamp-2" title={job.error_message}>
                             {job.error_message}
                           </p>
+                        )}
+                        {isAwaiting && lec && (
+                          <div className="mt-2">
+                            <DomainPicker
+                              domains={domains}
+                              recommendedId={lec.detected_domain_id}
+                              recommendedConfidence={lec.detected_confidence}
+                              topCandidates={lec.detected_top_candidates}
+                              currentDomainId={lec.domain_id}
+                              busy={confirmingId === lec.id}
+                              onConfirm={(id) => handleConfirm(lec.id, id)}
+                            />
+                          </div>
                         )}
                       </div>
                       {job.status === 'queued' && (
@@ -2802,10 +3089,83 @@ export default function App() {
     fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(setCurrentUser).catch(() => {})
   }, [])
 
+  // Lectures + domains fetched from server (도메인 그루핑용)
+  const [lectures, setLectures] = useState<Lecture[]>([])
+  const [domains, setDomains] = useState<DomainInfo[]>([])
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('lectures.collapsedGroups')
+      return stored ? new Set<string>(JSON.parse(stored)) : new Set<string>()
+    } catch {
+      return new Set<string>()
+    }
+  })
+  const refreshLecturesAndDomains = useCallback(async () => {
+    try {
+      const [lr, dr] = await Promise.all([
+        fetch('/api/lectures'),
+        fetch('/api/domains'),
+      ])
+      if (lr.ok) setLectures(await lr.json())
+      if (dr.ok) setDomains(await dr.json())
+    } catch {
+      /* 다음 폴링에서 재시도 */
+    }
+  }, [])
+  useEffect(() => { refreshLecturesAndDomains() }, [refreshLecturesAndDomains])
+  useEffect(() => {
+    const ACTIVE = new Set(['queued', 'processing', 'awaiting_domain'])
+    const hasActive = lectures.some(
+      (l) => l.latest_job_status && ACTIVE.has(l.latest_job_status),
+    )
+    if (!hasActive) return
+    const id = setInterval(refreshLecturesAndDomains, 5000)
+    return () => clearInterval(id)
+  }, [lectures, refreshLecturesAndDomains])
+
+  const lectureGroups = useMemo(
+    () => groupLecturesByDomain(lectures, domains),
+    [lectures, domains],
+  )
+
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      try {
+        localStorage.setItem(
+          'lectures.collapsedGroups',
+          JSON.stringify(Array.from(next)),
+        )
+      } catch {
+        /* localStorage 비활성 환경 무시 */
+      }
+      return next
+    })
+  }, [])
+
+  const handleDomainConfirm = useCallback(
+    async (lectureId: string, domainId: string) => {
+      try {
+        await postLectureDomain(lectureId, domainId)
+        await refreshLecturesAndDomains()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        alert(`도메인 컨펌 실패: ${msg}`)
+      }
+    },
+    [refreshLecturesAndDomains],
+  )
+
   const searchRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
 
   const selected = useMemo(() => entries.find((e) => e.id === selectedId) ?? entries[0], [selectedId])
+  const selectedLecture = useMemo(
+    () => lectures.find((l) => l.id === selectedId) ?? null,
+    [lectures, selectedId],
+  )
 
   const totalSegments = useMemo(
     () => entries.reduce((s, e) => s + (e.corrected?.segmentCount ?? e.raw?.segmentCount ?? 0), 0),
@@ -3334,55 +3694,26 @@ export default function App() {
             </div>
           </div>
 
-          {/* Entry list */}
+          {/* Entry list — 도메인별 그룹 + 검색 */}
           <nav className="flex-1 overflow-y-auto px-2 py-2 scrollbar-thin">
-            <div className="space-y-px">
-              {filteredEntries.map((entry) => {
-                const isActive = entry.id === selected?.id
-                const count = entry.corrected?.segmentCount ?? entry.raw?.segmentCount ?? 0
-                const hasPair = entry.corrected && entry.raw
-                const hasSummary = !!entry.summary
-                return (
-                  <button
-                    key={entry.id}
-                    onClick={() => setSelectedId(entry.id)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg text-[13px] transition-all duration-100 ${
-                      isActive
-                        ? 'bg-teal-600 text-white font-medium shadow-sm shadow-teal-600/20'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
-                    }`}
-                    title={entry.label}
-                  >
-                    <div className="truncate leading-snug">{entry.label}</div>
-                    <div className={`flex items-center gap-2 text-[11px] mt-1 ${isActive ? 'text-teal-200' : 'text-slate-400'}`}>
-                      {count > 0 && <span>{count}개 세그먼트</span>}
-                      {hasPair && (
-                        <span className={`inline-flex items-center gap-1 ${isActive ? 'text-teal-300' : 'text-slate-300'}`}>
-                          <span className="w-1 h-1 rounded-full bg-current" />
-                          교정 + 원본
-                        </span>
-                      )}
-                      {hasSummary && (
-                        <span className={`inline-flex items-center gap-1 ${isActive ? 'text-teal-300' : 'text-teal-400'}`}>
-                          <span className="w-1 h-1 rounded-full bg-current" />
-                          요약
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-
-            {filteredEntries.length === 0 && (
-              <div className="px-4 py-8 text-center text-sm text-slate-400">
-                &ldquo;{search}&rdquo; 결과 없음
-              </div>
-            )}
+            <LectureGroups
+              groups={lectureGroups}
+              entries={entries}
+              search={search}
+              selectedId={selected?.id ?? ''}
+              collapsedGroups={collapsedGroups}
+              onToggleGroup={toggleGroup}
+              onSelect={setSelectedId}
+            />
           </nav>
 
           {/* Upload panel */}
-          <UploadPanel />
+          <UploadPanel
+            lectures={lectures}
+            domains={domains}
+            onConfirmDomain={handleDomainConfirm}
+            onJobChanged={refreshLecturesAndDomains}
+          />
 
           {/* Bookmarks panel */}
           <BookmarksPanel
@@ -3402,23 +3733,43 @@ export default function App() {
 
         {/* Content */}
         <main className="flex-1 flex flex-col overflow-hidden relative">
-          {/* Content toolbar — title + copy only */}
+          {/* Content toolbar — title + domain badge + copy */}
           {selected && (
             <div className="shrink-0 border-b border-slate-200/80 px-5 py-2.5 flex items-center gap-3 bg-white">
-              <h2 className="text-[14px] font-semibold text-slate-800 truncate min-w-0 mr-auto">
+              <h2 className="text-[14px] font-semibold text-slate-800 truncate min-w-0">
                 {selected.label}
               </h2>
 
-              {/* Copy */}
-              <button
-                onClick={copyTranscript}
-                className={`p-1.5 rounded-md transition-colors ${
-                  copied ? 'text-teal-500 bg-teal-50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
-                }`}
-                title={copied ? '복사됨!' : '클립보드에 복사'}
-              >
-                {copied ? <CheckIcon /> : <CopyIcon />}
-              </button>
+              <LectureDomainBadge
+                lecture={selectedLecture}
+                domains={domains}
+                onConfirm={(domainId) =>
+                  handleDomainConfirm(selectedLecture!.id, domainId)
+                }
+              />
+
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={copyTranscript}
+                  className={`p-1.5 rounded-md transition-colors ${
+                    copied ? 'text-teal-500 bg-teal-50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+                  }`}
+                  title={copied ? '복사됨!' : '클립보드에 복사'}
+                >
+                  {copied ? <CheckIcon /> : <CopyIcon />}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 코렉션 재생성 배너 */}
+          {selectedLecture && (
+            selectedLecture.latest_job_status === 'queued' ||
+            selectedLecture.latest_job_status === 'processing'
+          ) && selectedLecture.latest_job_type !== 'stt' && (
+            <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-5 py-2 text-[12px] text-amber-800">
+              {selectedLecture.latest_job_type === 'correct' && '도메인 변경에 따라 코렉션을 다시 생성하는 중입니다...'}
+              {selectedLecture.latest_job_type === 'summary' && '요약을 생성하는 중입니다...'}
             </div>
           )}
 
