@@ -904,11 +904,11 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
                     stt_provider=STT_PROVIDER,
                 )
             elif DOMAIN_DETECTION == "generic":
-                domain = DomainMatch("generic", 0.0, *_load_domain_prompts("generic"))
+                _sys, _usr = _load_domain_prompts("generic")
+                domain = DomainMatch("generic", 0.0, _sys, _usr, [])
             else:
-                domain = DomainMatch(
-                    DOMAIN_DETECTION, 1.0, *_load_domain_prompts(DOMAIN_DETECTION)
-                )
+                _sys, _usr = _load_domain_prompts(DOMAIN_DETECTION)
+                domain = DomainMatch(DOMAIN_DETECTION, 1.0, _sys, _usr, [])
             print(f"\n[교정] {CORRECTION_MODEL} 교정 | 도메인: {domain.domain_id}"
                   f" (신뢰도: {domain.confidence:.3f})")
             corrected_segments = correct_transcript_parallel(
