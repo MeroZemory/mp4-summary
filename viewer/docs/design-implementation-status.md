@@ -135,6 +135,19 @@
 
 ---
 
+## 3.3 파일 해시 기반 사용자별 캐싱 ✅ 완료
+
+✅ 008_file_hash.sql + jobs.py upload_mp4 재작성:
+- 업로드 스트리밍 중 sha256 누적 → `file_hash` 컬럼 (`lectures`, `jobs`).
+- lecture_id 결정적 규칙 `${user_short8}__${hash12}` — 같은 사용자 + 같은 파일이면 항상 동일.
+- (user_id, file_hash) UNIQUE partial index — 중복 업로드 시 새 lecture/jobs 만들지 않고 기존 lecture 의 최신 job 반환.
+- 다른 사용자가 같은 파일 업로드 → 다른 lecture_id (user prefix 다름) → 권한·메타·재생성 모두 격리.
+- `lecture_data._extract_base` 정규식을 stage 키워드 명시 매칭으로 강화 — 새 lecture_id 끝이 hex 라도 cache key suffix 만 정확히 제거.
+
+이전 답변에서 짚은 "강의 소유권 빼앗김 / 캐싱 무효" 두 문제 동시 해결.
+
+---
+
 ## 4. 다음 PR 우선순위 (남은 작업)
 
 > 이전 1·7 항목은 완료. 우선순위 갱신:

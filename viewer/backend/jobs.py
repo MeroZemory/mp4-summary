@@ -13,6 +13,7 @@ SELECT ... FOR UPDATE SKIP LOCKED 로 작업을 클레임 → process_single_vid
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -111,27 +112,43 @@ def _row_to_response(row: asyncpg.Record) -> JobResponse:
 
 # ── 업로드 ────────────────────────────────────────────────────────────────────
 
+def _build_lecture_id(user_uuid: uuid.UUID, file_hash: str) -> str:
+    """결정적 lecture_id — 같은 사용자 + 같은 파일이면 항상 동일.
+
+    형식: `{user_short8}__{hash12}` (총 22자, 파일 시스템 / URL 안전).
+    """
+    user_short = user_uuid.hex[:8]
+    return f"{user_short}__{file_hash[:12]}"
+
+
 @router.post("/upload", response_model=JobResponse)
 async def upload_mp4(
     file: UploadFile = File(...),
     user: dict = Depends(require_user),
 ):
+    """파일을 업로드하고 file_hash 기반으로 캐싱된 lecture 가 있으면 재사용.
+
+    같은 (user_id, file_hash) 조합이 이미 존재하면 새 jobs / lecture 를
+    만들지 않고 기존 lecture 를 가리키는 stale job row 를 반환 (frontend 가
+    redirect / 안내). 새 파일이면 해시를 계산해 결정적 lecture_id 로 저장.
+    """
     if not file.filename:
         raise HTTPException(400, "파일명이 필요합니다")
 
-    # MP4 (영상) 또는 MP3 (음성 추출 단계 스킵) 허용
     lower = file.filename.lower()
     if not lower.endswith(_ALLOWED_EXTS):
         raise HTTPException(400, "MP4 또는 MP3 파일만 업로드할 수 있습니다")
 
-    safe_name = _unique_filename(file.filename)
-    lecture_id = Path(safe_name).stem
-    target_path = DOWNLOADS_DIR / safe_name
+    ext = ".mp3" if lower.endswith(".mp3") else ".mp4"
+    user_uuid = uuid.UUID(user["id"])
 
-    # 스트리밍 저장 (대용량 mp4 대응)
+    # 1) 임시 파일에 스트리밍 저장하면서 sha256 누적.
+    tmp_name = f"upload_{uuid.uuid4().hex}{ext}"
+    tmp_path = DOWNLOADS_DIR / tmp_name
+    hasher = hashlib.sha256()
     total = 0
     try:
-        with open(target_path, "wb") as out:
+        with open(tmp_path, "wb") as out:
             while True:
                 chunk = await file.read(UPLOAD_CHUNK_SIZE)
                 if not chunk:
@@ -139,41 +156,77 @@ async def upload_mp4(
                 total += len(chunk)
                 if total > MAX_UPLOAD_BYTES:
                     out.close()
-                    target_path.unlink(missing_ok=True)
-                    raise HTTPException(413, f"파일 크기가 제한을 초과합니다 ({MAX_UPLOAD_BYTES} bytes)")
+                    tmp_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        413,
+                        f"파일 크기가 제한을 초과합니다 ({MAX_UPLOAD_BYTES} bytes)",
+                    )
+                hasher.update(chunk)
                 out.write(chunk)
     except HTTPException:
+        tmp_path.unlink(missing_ok=True)
         raise
     except Exception as e:
-        target_path.unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
         raise HTTPException(500, f"업로드 저장 실패: {e}")
 
+    file_hash = hasher.hexdigest()
+    lecture_id = _build_lecture_id(user_uuid, file_hash)
+    final_name = f"{lecture_id}{ext}"
+    final_path = DOWNLOADS_DIR / final_name
+
     pool = await get_pool()
-    user_uuid = uuid.UUID(user["id"])
     async with pool.acquire() as conn:
+        # 2) 동일 사용자 + 동일 해시의 lecture 가 이미 있는지 확인.
+        existing = await conn.fetchrow(
+            "SELECT id FROM lectures WHERE user_id = $1 AND file_hash = $2",
+            user_uuid, file_hash,
+        )
+
+        if existing is not None:
+            # 캐시 hit — 임시 파일 폐기하고 기존 lecture 의 최신 job 반환.
+            tmp_path.unlink(missing_ok=True)
+            cached_job = await conn.fetchrow(
+                """
+                SELECT * FROM jobs
+                WHERE user_id = $1 AND lecture_id = $2
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                user_uuid, existing["id"],
+            )
+            if cached_job is not None:
+                return _row_to_response(cached_job)
+            # lectures 행은 있으나 jobs 가 비어있는 비정상 케이스 — fall through 해서 신규 처리
+
+        # 3) 신규 — 임시 파일을 결정적 경로로 이동 (이미 있으면 그대로 사용).
+        if final_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        else:
+            tmp_path.rename(final_path)
+
         async with conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO lectures (id, user_id, original_name, domain_status)
-                VALUES ($1, $2, $3, 'pending')
+                INSERT INTO lectures (id, user_id, original_name, domain_status, file_hash)
+                VALUES ($1, $2, $3, 'pending', $4)
                 ON CONFLICT (id) DO UPDATE
-                  SET user_id = EXCLUDED.user_id,
-                      original_name = EXCLUDED.original_name,
+                  SET original_name = EXCLUDED.original_name,
+                      file_hash = EXCLUDED.file_hash,
                       updated_at = now()
                 """,
-                lecture_id, user_uuid, file.filename,
+                lecture_id, user_uuid, file.filename, file_hash,
             )
             row = await conn.fetchrow(
                 """
                 INSERT INTO jobs (user_id, filename, original_name, file_size,
-                                  lecture_id, status, job_type)
-                VALUES ($1, $2, $3, $4, $5, 'queued', 'stt')
+                                  lecture_id, status, job_type, file_hash)
+                VALUES ($1, $2, $3, $4, $5, 'queued', 'stt', $6)
                 RETURNING *
                 """,
-                user_uuid, safe_name, file.filename, total, lecture_id,
+                user_uuid, final_name, file.filename, total, lecture_id, file_hash,
             )
 
-    # 아이들 워커 깨우기
     notify_queue_change()
     return _row_to_response(row)
 

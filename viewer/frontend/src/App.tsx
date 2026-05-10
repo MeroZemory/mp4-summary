@@ -511,7 +511,8 @@ function HtmlFragment({ html }: { html: string }) {
     () =>
       `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank">` +
       `<style>` +
-      `html,body{margin:0;padding:0;background:#ffffff;` +
+      // overflow:hidden — 부모 reader 가 스크롤을 담당하므로 iframe 자체엔 scrollbar 가 절대 안 생기게.
+      `html,body{margin:0;padding:0;background:#ffffff;overflow:hidden;` +
       `font-family:-apple-system,'Segoe UI','Noto Sans KR','Pretendard',sans-serif;` +
       `color:#1c1917;font-feature-settings:"ss01","cv11";letter-spacing:-0.005em;}` +
       `body{padding:20px;}` +
@@ -1441,13 +1442,21 @@ function SummaryPanel({
 
 function NotesSection({
   lectureId, notesClaude, models,
+  expanded: expandedProp,
+  onToggle,
 }: {
   lectureId: string
   // GPT 변형은 임시 중단 — Claude (Opus) 단독.
   notesClaude: string
   models?: LectureSummary['models']
+  // controlled expand — TOC 자동 expand 를 위해 부모가 owner.
+  // prop 미지정 시 내부 state 로 fallback (기존 동작 유지).
+  expanded?: boolean
+  onToggle?: () => void
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [internalExpanded, setInternalExpanded] = useState(false)
+  const expanded = expandedProp !== undefined ? expandedProp : internalExpanded
+  const setExpanded = onToggle ?? (() => setInternalExpanded((v) => !v))
   const slot = useModuleVersions(lectureId, 'notes', 'claude', notesClaude)
   const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
   const activeModelId = currentMeta?.model_id ?? models?.claude_summary
@@ -1455,7 +1464,7 @@ function NotesSection({
   return (
     <div className="px-5 py-4">
       <div className="flex items-center justify-between mb-3 gap-3">
-        <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-2 text-left min-w-0">
+        <button onClick={() => setExpanded()} className="flex items-center gap-2 text-left min-w-0">
           <ChevronDownIcon className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`} />
           <h3 className="text-[14px] font-semibold text-slate-800">강의 정리</h3>
           <span className="text-[11px] text-slate-400 hidden sm:inline">강의를 대체할 수 있는 포괄적 노트</span>
@@ -3624,18 +3633,24 @@ function TocChipIcon({ name }: { name: string }) {
   )
 }
 
-function AnchorToc({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement> }) {
+interface AnchorTocProps {
+  scrollRef: React.RefObject<HTMLDivElement>
+  // jump 직전 호출 — 부모가 collapsed 섹션을 자동 expand 해서 anchor 가 mount 되도록 함
+  onBeforeJump?: (k: ReaderTocKey) => void
+}
+
+function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
   const [active, setActive] = useState<ReaderTocKey>('overview')
 
-  // sticky TOC bar 높이(36) + 약간의 여유 — anchor 가 TOC 바로 아래에 정렬되도록
-  const TOP_OFFSET = 44
+  // sticky TOC bar 높이 = 36. 여유 없이 정확히 TOC 바로 아래로 정렬.
+  const TOP_OFFSET = 36
 
   useEffect(() => {
     const root = scrollRef.current
     if (!root) return
     const onScroll = () => {
       const rootRect = root.getBoundingClientRect()
-      const trigger = TOP_OFFSET + 16
+      const trigger = TOP_OFFSET + 8
       let current: ReaderTocKey = READER_TOC_ITEMS[0].k
       for (const t of READER_TOC_ITEMS) {
         const el = root.querySelector<HTMLElement>('#section-' + t.k)
@@ -3650,18 +3665,25 @@ function AnchorToc({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement> }
     return () => root.removeEventListener('scroll', onScroll)
   }, [scrollRef])
 
-  const jumpTo = (k: ReaderTocKey) => {
+  const performJump = (k: ReaderTocKey) => {
     const root = scrollRef.current
     if (!root) return
     const el = root.querySelector<HTMLElement>('#section-' + k)
     if (!el) return
-    // getBoundingClientRect 차이 + 현재 scrollTop 으로 정확한 위치 계산.
-    // offsetTop 은 nearest positioned ancestor 기준이라 중첩 컨테이너 (SummaryPanel) 안에서 어긋남.
     const rootRect = root.getBoundingClientRect()
     const elRect = el.getBoundingClientRect()
     const target = elRect.top - rootRect.top + root.scrollTop - TOP_OFFSET
     root.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
     setActive(k)
+  }
+
+  const jumpTo = (k: ReaderTocKey) => {
+    // 부모에게 expand 신호. expand → React rerender → DOM 업데이트 후 anchor mount.
+    // 두 frame 후 실제 jump (1 frame: state commit, 2 frame: layout 안정화).
+    onBeforeJump?.(k)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => performJump(k))
+    })
   }
 
   return (
@@ -3940,6 +3962,7 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const [activeNav, setActiveNav] = useState<ShellNavKey>('lectures')
   const [summaryCollapsed, setSummaryCollapsed] = useState(false)
+  const [notesExpanded, setNotesExpanded] = useState(false)
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true)
   const [chatOpen, setChatOpen] = useState(false)
   const [currentUser, setCurrentUser] = useState<{ email: string; display_name: string | null } | null>(null)
@@ -4056,6 +4079,7 @@ export default function App() {
     setContentSearch('')
     setViewMode('corrected')
     setSummaryCollapsed(false)
+    setNotesExpanded(false)
     setTranscriptCollapsed(true)
     setContextMenu(null)
     setBookmarkAddDialog(null)
@@ -4274,7 +4298,7 @@ export default function App() {
           )}
 
           {/* Comprehensive Notes (강의 정리) — anchor: section-notes. Claude 단독.
-              key={lectureId} 로 강의 전환 시 강제 remount. */}
+              key={lectureId} 로 강의 전환 시 강제 remount. expanded 는 controlled — TOC 자동 expand 가능. */}
           {selected.summary && (selected.summary.notes_claude || selected.summary.notes_gpt) && (
             <div id="section-notes" style={{ scrollMarginTop: 50 }}>
               <NotesSection
@@ -4282,6 +4306,8 @@ export default function App() {
                 lectureId={selected.id}
                 notesClaude={selected.summary.notes_claude ?? ''}
                 models={selected.summary.models}
+                expanded={notesExpanded}
+                onToggle={() => setNotesExpanded((v) => !v)}
               />
             </div>
           )}
@@ -4592,9 +4618,21 @@ export default function App() {
             </div>
           )}
 
-          {/* Sticky anchor TOC — design D · Hybrid */}
+          {/* Sticky anchor TOC — design D · Hybrid.
+              onBeforeJump 으로 collapsed 섹션을 자동 expand → DOM 안정 후 jump. */}
           {selected && selected.summary && (
-            <AnchorToc scrollRef={contentRef} />
+            <AnchorToc
+              scrollRef={contentRef}
+              onBeforeJump={(k) => {
+                if (k === 'overview' || k === 'concepts' || k === 'timeline' || k === 'showme' || k === 'qa') {
+                  setSummaryCollapsed(false)
+                } else if (k === 'notes') {
+                  setNotesExpanded(true)
+                } else if (k === 'transcript') {
+                  setTranscriptCollapsed(false)
+                }
+              }}
+            />
           )}
 
           {/* Scrollable content */}
