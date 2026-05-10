@@ -43,13 +43,16 @@ UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 _SAFE_NAME = re.compile(r"[^\w\-.]+", re.UNICODE)
 
 
+_ALLOWED_EXTS = (".mp4", ".mp3")
+
+
 def _sanitize_filename(name: str) -> str:
-    """파일명 정화 — 경로 분리자 / 제어문자 제거."""
+    """파일명 정화 — 경로 분리자 / 제어문자 제거. 확장자(.mp4 / .mp3)는 보존."""
     base = os.path.basename(name or "").strip()
     if not base:
         return "upload.mp4"
     base = _SAFE_NAME.sub("_", base)
-    if not base.lower().endswith(".mp4"):
+    if not base.lower().endswith(_ALLOWED_EXTS):
         base = base + ".mp4"
     return base[:200]
 
@@ -116,10 +119,10 @@ async def upload_mp4(
     if not file.filename:
         raise HTTPException(400, "파일명이 필요합니다")
 
-    # MP4만 허용
+    # MP4 (영상) 또는 MP3 (음성 추출 단계 스킵) 허용
     lower = file.filename.lower()
-    if not lower.endswith(".mp4"):
-        raise HTTPException(400, "MP4 파일만 업로드할 수 있습니다")
+    if not lower.endswith(_ALLOWED_EXTS):
+        raise HTTPException(400, "MP4 또는 MP3 파일만 업로드할 수 있습니다")
 
     safe_name = _unique_filename(file.filename)
     lecture_id = Path(safe_name).stem

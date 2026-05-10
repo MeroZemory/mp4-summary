@@ -3312,9 +3312,12 @@ function UploadPanel({
 
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setUploadError(null)
-    const list = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.mp4'))
+    const list = Array.from(files).filter((f) => {
+      const name = f.name.toLowerCase()
+      return name.endsWith('.mp4') || name.endsWith('.mp3')
+    })
     if (list.length === 0) {
-      setUploadError('MP4 파일만 업로드할 수 있습니다')
+      setUploadError('MP4 또는 MP3 파일만 업로드할 수 있습니다')
       return
     }
     setUploading((n) => n + list.length)
@@ -3353,7 +3356,10 @@ function UploadPanel({
   }, [loadJobs])
 
   const activeCount = jobs.filter((j) => !TERMINAL_STATUSES.has(j.status)).length
-  const displayJobs = jobs.slice(0, 8)
+  // 완료/취소된 작업은 list 에서 숨김 (완료는 배너로 안내, 실패는 표시 유지)
+  const displayJobs = jobs
+    .filter((j) => j.status !== 'completed' && j.status !== 'canceled')
+    .slice(0, 8)
 
   return (
     <div className="border-t border-slate-100">
@@ -3364,7 +3370,7 @@ function UploadPanel({
         <ChevronDownIcon
           className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`}
         />
-        <span className="text-[12px] font-semibold text-slate-600">MP4 업로드</span>
+        <span className="text-[12px] font-semibold text-slate-600">MP4 / MP3 업로드</span>
         {activeCount > 0 && (
           <span className="ml-auto bg-teal-500 text-white text-[10px] rounded-full min-w-[18px] px-1.5 py-0.5 inline-flex items-center justify-center font-semibold leading-none">
             {activeCount}
@@ -3387,12 +3393,14 @@ function UploadPanel({
             }`}
           >
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              MP4 파일을<br />드래그하거나 클릭
+              MP4 또는 MP3 파일을<br />드래그하거나 클릭
+              <br />
+              <span className="text-[10px] text-slate-400">MP3는 음성 추출 단계 자동 스킵</span>
             </p>
             <input
               ref={fileInputRef}
               type="file"
-              accept="video/mp4,.mp4"
+              accept="video/mp4,.mp4,audio/mpeg,.mp3"
               multiple
               className="hidden"
               onChange={(e) => {
