@@ -3642,10 +3642,13 @@ interface AnchorTocProps {
 function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
   const [active, setActive] = useState<ReaderTocKey>('overview')
 
-  // sticky TOC bar 높이 = 36. 콘텐츠 시작점(inner padding 안쪽) 이 TOC 바로 아래에 정렬되도록 한다.
-  const TOC_HEIGHT = 36
+  // 핵심: AnchorToc 는 scrollRef(contentRef) **외부 sibling** 의 sticky bar 다.
+  // 즉 contentRef.scrollTo({top: X}) 후 사용자가 보이는 viewport 의 top
+  // 자체가 이미 sticky TOC 바로 아래. 추가로 TOC_HEIGHT 를 빼지 않는다.
+  // 콘텐츠 시작점(element top + inner padding) 이 contentRef viewport top 에
+  // 정렬되도록 scrollTop = elementTopAbsolute + innerPaddingTop.
 
-  // anchor wrapper 의 inner padding-top 합산 — 첫 child 의 padding 도 고려.
+  // anchor wrapper 의 inner padding-top — element 자체 + 첫 child 중 큰 값.
   const measureInnerPaddingTop = (el: HTMLElement): number => {
     const own = parseFloat(getComputedStyle(el).paddingTop) || 0
     const child = el.firstElementChild as HTMLElement | null
@@ -3662,9 +3665,9 @@ function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
       for (const t of READER_TOC_ITEMS) {
         const el = root.querySelector<HTMLElement>('#section-' + t.k)
         if (!el) continue
-        // 콘텐츠 시작점 (element top + inner padding) 이 TOC 바로 아래를 지났는지 판단
+        // 콘텐츠 시작점 (element top + inner padding) 이 root viewport top 을 지났는지
         const contentTop = el.getBoundingClientRect().top - rootRect.top + measureInnerPaddingTop(el)
-        if (contentTop <= TOC_HEIGHT + 4) current = t.k
+        if (contentTop <= 4) current = t.k
       }
       setActive(current)
     }
@@ -3680,10 +3683,9 @@ function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
     if (!el) return
     const rootRect = root.getBoundingClientRect()
     const elRect = el.getBoundingClientRect()
-    // 콘텐츠 시작점 = elementTop + inner padding-top 이 TOC 바로 아래에 위치하도록
     const innerPad = measureInnerPaddingTop(el)
-    const contentTopAbsolute = elRect.top - rootRect.top + root.scrollTop + innerPad
-    const target = contentTopAbsolute - TOC_HEIGHT
+    // 콘텐츠 시작점이 contentRef viewport top (= sticky TOC 바로 아래) 에 정렬
+    const target = elRect.top - rootRect.top + root.scrollTop + innerPad
     root.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
     setActive(k)
   }
