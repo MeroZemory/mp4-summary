@@ -431,7 +431,10 @@ type ShowMeModel = 'gpt' | 'claude'
 type ShowMeBlock =
   | { type: 'markdown'; content: string }
   | { type: 'mermaid'; code: string }
+  | { type: 'svg'; code: string }
   | { type: 'csv'; data: string[][] }
+
+const DIAGRAM_LANGS = ['mermaid', 'svg', 'csv'] as const
 
 function parseShowMeContent(raw: string): ShowMeBlock[] {
   const blocks: ShowMeBlock[] = []
@@ -455,6 +458,8 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
 
       if (lang === 'mermaid') {
         blocks.push({ type: 'mermaid', code: codeLines.join('\n') })
+      } else if (lang === 'svg') {
+        blocks.push({ type: 'svg', code: codeLines.join('\n') })
       } else if (lang === 'csv') {
         const data = codeLines
           .filter((l) => l.trim())
@@ -468,7 +473,8 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
       const mdLines: string[] = []
       while (i < lines.length) {
         const t = lines[i].trimStart()
-        if (t.match(/^```(\w+)/) && ['mermaid', 'csv'].includes(t.match(/^```(\w+)/)![1].toLowerCase())) break
+        const m = t.match(/^```(\w+)/)
+        if (m && (DIAGRAM_LANGS as readonly string[]).includes(m[1].toLowerCase())) break
         mdLines.push(lines[i])
         i++
       }
@@ -478,6 +484,15 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
   }
 
   return blocks
+}
+
+// LLM이 생성한 SVG는 신뢰할 수 없으므로 <script>, on* 핸들러, javascript: URI를 제거한다
+function sanitizeSvg(raw: string): string {
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<script[^>]*\/?\s*>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:xlink:href|href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '')
 }
 
 function CsvTable({ data }: { data: string[][] }) {
@@ -663,6 +678,51 @@ function MermaidDiagram({ code }: { code: string }) {
   )
 }
 
+function SvgDiagram({ code }: { code: string }) {
+  const safeSvg = useMemo(() => sanitizeSvg(code), [code])
+  const [fullscreen, setFullscreen] = useState(false)
+
+  const MAX_ASPECT = 1.8
+  const displayStyle = useMemo(() => {
+    const match = safeSvg.match(/viewBox="[\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"/)
+    if (!match) return { width: '100%', maxWidth: '100%' } as const
+    const vbW = parseFloat(match[1])
+    const vbH = parseFloat(match[2])
+    if (!vbW || !vbH) return { width: '100%', maxWidth: '100%' } as const
+    const aspect = vbH / vbW
+    if (aspect <= MAX_ASPECT) return { width: '100%', maxWidth: '100%' } as const
+    const pct = Math.max(30, Math.round((MAX_ASPECT / aspect) * 100))
+    return { width: `${pct}%`, maxWidth: `${pct}%`, margin: '0 auto' } as const
+  }, [safeSvg])
+
+  if (!safeSvg.includes('<svg')) {
+    return (
+      <div className="my-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+        <p className="text-[12px] text-amber-600 font-medium mb-2">SVG 다이어그램 파싱 실패</p>
+        <pre className="text-[12px] font-mono text-slate-600 whitespace-pre-wrap bg-white rounded-lg p-3 border border-slate-200">{code}</pre>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="my-4 relative group rounded-xl border border-slate-200 bg-white p-4 overflow-x-auto mermaid-wide">
+        <div style={displayStyle} dangerouslySetInnerHTML={{ __html: safeSvg }} />
+        <button
+          onClick={() => setFullscreen(true)}
+          className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-white/80 border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-white shadow-sm opacity-0 group-hover:opacity-100 transition-all"
+          title="전체 화면으로 보기"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+          </svg>
+        </button>
+      </div>
+      {fullscreen && <DiagramModal svg={safeSvg} onClose={() => setFullscreen(false)} />}
+    </>
+  )
+}
+
 function DiagramModal({ svg, onClose }: { svg: string; onClose: () => void }) {
   const [scale, setScale] = useState(1)
   const [pos, setPos] = useState({ x: 0, y: 0 })
@@ -790,6 +850,7 @@ function ShowMe({
       {/* Rendered blocks */}
       <div>
         {blocks.map((block, i) => {
+          if (block.type === 'svg') return <SvgDiagram key={`${model}-${i}`} code={block.code} />
           if (block.type === 'mermaid') return <MermaidDiagram key={`${model}-${i}`} code={block.code} />
           if (block.type === 'csv') return <CsvTable key={`${model}-${i}`} data={block.data} />
           return <MarkdownContent key={`${model}-${i}`} content={block.content} />

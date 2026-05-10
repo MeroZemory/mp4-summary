@@ -658,104 +658,94 @@ def _call_gpt_text(system_prompt: str, user_prompt: str, label: str) -> str:
     return ""
 
 
-def _generate_show_me(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성: 마크다운 + Mermaid 다이어그램"""
-    system = r"""당신은 학술 강의를 시각적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 마크다운 텍스트와 Mermaid 다이어그램을 혼합한 시각적 요약을 만드세요.
+_SHOW_ME_SYSTEM_PROMPT = r"""당신은 학술 강의를 시각적으로 정리하는 전문가입니다.
+강의 녹취록을 읽고, 마크다운 텍스트와 직접 작성한 SVG 다이어그램을 혼합한 시각적 요약을 만드세요.
 
 ## 출력 형식 규칙
 
 1. 일반 텍스트는 마크다운 형식 (##, **, -, 등)
-2. 다이어그램은 반드시 ```mermaid 코드 블록으로 감쌈
+2. 다이어그램은 반드시 ```svg 코드 블록으로 감쌈 (raw <svg> 태그를 직접 작성)
 3. 한국어로 작성하되, 영어 전문 용어는 원문 유지
+4. 보안: <script> 태그, on* 이벤트 핸들러, 외부 URL 참조(href, xlink:href, <image>의 외부 url) 절대 사용 금지
+
+## SVG 작성 규칙
+
+- 모든 다이어그램은 `viewBox="0 0 1280 720"` (16:9, PT 비율) 고정
+- xmlns 명시: `<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" ...>`
+- 폰트: `font-family="-apple-system, 'Segoe UI', 'Noto Sans KR', sans-serif"`
+- **색상 팔레트** (이 6가지만 사용):
+  - 캔버스 배경(생략 가능): 흰색
+  - 카드/그룹 배경: `#f1f5f9` (slate-100)
+  - 텍스트 강조: `#0f172a` (slate-900)
+  - 텍스트 본문/엣지: `#475569` (slate-600)
+  - Primary 노드: `#0ea5e9` (sky-500) — 흰 글씨
+  - Secondary 노드: `#14b8a6` (teal-500) — 흰 글씨
+  - Accent 강조: `#f59e0b` (amber-500) — 흰 글씨
+- 노드: 둥근 사각형 `<rect rx="14" ry="14">` 또는 `<g>`로 합성
+- 텍스트: 항상 `text-anchor="middle" dominant-baseline="central"`로 노드 가운데 정렬
+- 화살표: `<defs>`에 marker 한 번 정의 후 `marker-end="url(#arrow)"`로 재사용
+- 의미 그룹화: 반투명 카드 배경(slate-100) + 그룹 라벨로 묶기
+- 노드 폭 계산 가이드: `max(140, 한국어글자수 * 22 + 40)` (영어는 글자수 × 12)
+- 좌표는 viewBox 영역(0~1280, 0~720) 내부에 모두 들어와야 함. 노드 간 최소 30px 간격
 
 ## 필수 포함 섹션
 
 ### 1. 강의 개요 (1~2문단 마크다운)
-강의 핵심을 간결하게 요약
+강의 핵심을 간결하게 요약.
 
-### 2. 강의 흐름도 (Mermaid flowchart)
-강의의 주제 전개를 flowchart TD로 표현. 5~8개 노드.
-예시:
-```mermaid
-flowchart TD
-    A["서론: 강의 목표 소개"] --> B["배경: 기존 연구 리뷰"]
-    B --> C["방법론: 새로운 접근법"]
-    C --> D["결과: 실험 분석"]
-    D --> E["결론: 향후 과제"]
+### 2. 강의 흐름도 (SVG)
+강의 주제 전개를 5~7개 노드로 가로 또는 세로 플로우. 예시:
+
+```svg
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', 'Noto Sans KR', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect x="60" y="320" width="200" height="80" rx="14" fill="#0ea5e9"/>
+  <text x="160" y="360" fill="#ffffff" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central">서론</text>
+  <line x1="260" y1="360" x2="340" y2="360" stroke="#475569" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="340" y="320" width="220" height="80" rx="14" fill="#14b8a6"/>
+  <text x="450" y="360" fill="#ffffff" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central">배경 연구</text>
+  <!-- ... -->
+</svg>
 ```
 
-### 3. 핵심 개념 관계도 (Mermaid graph)
-주요 개념 간의 관계를 graph LR 또는 graph TD로 표현. 8~15개 노드.
-노드 라벨에 특수문자(괄호, 슬래시 등)가 있으면 반드시 큰따옴표로 감싸세요.
-예시:
-```mermaid
-graph LR
-    A["Pharmacogenomics"] --> B["CYP450"]
-    A --> C["Drug Response"]
-    B --> D["CYP2D6"]
+### 3. 핵심 개념 관계도 (SVG)
+주요 개념 8~12개 + 관계선. 트리·방사형·계층 레이아웃 중 적합한 것 선택.
+의미 묶음은 카드 배경으로 그룹화:
+
+```svg
+<g>
+  <rect x="60" y="60" width="380" height="240" rx="20" fill="#f1f5f9"/>
+  <text x="80" y="92" fill="#0f172a" font-size="14" font-weight="700">CYP 효소</text>
+  <!-- 그룹 내부 노드/연결선 -->
+</g>
 ```
 
-## Mermaid 문법 주의사항
-- 노드 ID는 영문/숫자만 사용 (A, B, node1 등)
-- 노드 라벨은 ["텍스트"] 형식으로 항상 큰따옴표 사용
-- 화살표: --> (기본), -.-> (점선), ==> (굵은)
-- 괄호, 슬래시, 특수문자는 라벨 안에서만 사용 (큰따옴표 필수)
-- subgraph 사용 가능"""
+## 작성 주의사항
+- 모든 좌표가 viewBox 안에 들어가는지 검산
+- 텍스트가 노드 영역을 벗어나면 노드 폭을 늘릴 것
+- 두 도형이 겹치지 않도록 좌표 분배
+- 마커 정의(id="arrow")는 다이어그램당 한 번만, 같은 id로 모든 화살표 재사용 가능
+- 외부 리소스(이미지 URL, 폰트 URL) 참조 금지
+"""
 
+
+def _generate_show_me(transcript_text: str) -> str:
+    """ShowMe 콘텐츠 생성: 마크다운 + 인라인 SVG 다이어그램"""
     user = f"다음 강의 녹취록을 분석하고 시각적 요약을 생성하세요:\n\n{transcript_text}"
-    return _call_gpt_text(system, user, "show_me_gpt")
+    return _call_gpt_text(_SHOW_ME_SYSTEM_PROMPT, user, "show_me_gpt")
 
 
 def _generate_show_me_claude(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성 (Claude Opus 4.7)"""
+    """ShowMe 콘텐츠 생성 (Claude Opus): 마크다운 + 인라인 SVG 다이어그램"""
     if not anthropic_client:
         print("    [ShowMe] Anthropic API 키 없음 — 건너뜀")
         return ""
 
-    system = r"""당신은 학술 강의를 시각적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 마크다운 텍스트와 Mermaid 다이어그램을 혼합한 시각적 요약을 만드세요.
-
-## 출력 형식 규칙
-
-1. 일반 텍스트는 마크다운 형식 (##, **, -, 등)
-2. 다이어그램은 반드시 ```mermaid 코드 블록으로 감쌈
-3. 한국어로 작성하되, 영어 전문 용어는 원문 유지
-
-## 필수 포함 섹션
-
-### 1. 강의 개요 (1~2문단 마크다운)
-강의 핵심을 간결하게 요약
-
-### 2. 강의 흐름도 (Mermaid flowchart)
-강의의 주제 전개를 flowchart TD로 표현. 5~8개 노드.
-예시:
-```mermaid
-flowchart TD
-    A["서론: 강의 목표 소개"] --> B["배경: 기존 연구 리뷰"]
-    B --> C["방법론: 새로운 접근법"]
-    C --> D["결과: 실험 분석"]
-    D --> E["결론: 향후 과제"]
-```
-
-### 3. 핵심 개념 관계도 (Mermaid graph)
-주요 개념 간의 관계를 graph LR 또는 graph TD로 표현. 8~15개 노드.
-노드 라벨에 특수문자(괄호, 슬래시 등)가 있으면 반드시 큰따옴표로 감싸세요.
-예시:
-```mermaid
-graph LR
-    A["Pharmacogenomics"] --> B["CYP450"]
-    A --> C["Drug Response"]
-    B --> D["CYP2D6"]
-```
-
-## Mermaid 문법 주의사항
-- 노드 ID는 영문/숫자만 사용 (A, B, node1 등)
-- 노드 라벨은 ["텍스트"] 형식으로 항상 큰따옴표 사용
-- 화살표: --> (기본), -.-> (점선), ==> (굵은)
-- 괄호, 슬래시, 특수문자는 라벨 안에서만 사용 (큰따옴표 필수)
-- subgraph 사용 가능"""
-
+    system = _SHOW_ME_SYSTEM_PROMPT
     user = f"다음 강의 녹취록을 분석하고 시각적 요약을 생성하세요:\n\n{transcript_text}"
 
     for attempt in range(3):
