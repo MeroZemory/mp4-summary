@@ -500,12 +500,74 @@ function isHtmlFragment(raw: string): boolean {
   return /^\s*</.test(raw)
 }
 
+// LLM 이 생성한 HTML 단편은 <style> 블록이 페이지 전역에 영향을 미치므로
+// iframe sandbox 안에 격리한다. allow-scripts 는 빼고 same-origin 만 허용.
 function HtmlFragment({ html }: { html: string }) {
   const safe = useMemo(() => sanitizeSvg(html), [html])
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [height, setHeight] = useState(360)
+
+  const srcDoc = useMemo(
+    () =>
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank">` +
+      `<style>` +
+      `html,body{margin:0;padding:0;background:#ffffff;` +
+      `font-family:-apple-system,'Segoe UI','Noto Sans KR','Pretendard',sans-serif;` +
+      `color:#1c1917;font-feature-settings:"ss01","cv11";letter-spacing:-0.005em;}` +
+      `body{padding:20px;}` +
+      `svg{max-width:100%;height:auto;display:block;margin:0 auto;}` +
+      `*{box-sizing:border-box;}` +
+      `</style></head><body>${safe}</body></html>`,
+    [safe],
+  )
+
+  // 콘텐츠 변경/폰트 로드 후 정확한 높이로 자동 리사이즈
+  useEffect(() => {
+    const iframe = iframeRef.current
+    if (!iframe) return
+    let cancelled = false
+    const measure = () => {
+      if (cancelled) return
+      try {
+        const doc = iframe.contentDocument
+        if (!doc) return
+        const h = Math.max(
+          doc.documentElement.scrollHeight,
+          doc.body.scrollHeight,
+        )
+        if (h && Math.abs(h - height) > 2) setHeight(h)
+      } catch {
+        /* sandbox 접근 차단 시 무시 */
+      }
+    }
+    const onLoad = () => {
+      measure()
+      // 폰트 / 이미지 로드 후 재측정
+      window.setTimeout(measure, 80)
+      window.setTimeout(measure, 320)
+    }
+    iframe.addEventListener('load', onLoad)
+    return () => {
+      cancelled = true
+      iframe.removeEventListener('load', onLoad)
+    }
+  }, [srcDoc, height])
+
   return (
-    <div
-      className="lecture-html-fragment my-4 rounded-xl border border-slate-200 bg-white overflow-x-auto p-5"
-      dangerouslySetInnerHTML={{ __html: safe }}
+    <iframe
+      ref={iframeRef}
+      srcDoc={srcDoc}
+      sandbox="allow-same-origin"
+      title="강의 시각화"
+      style={{
+        width: '100%',
+        height,
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        background: 'var(--surface)',
+        display: 'block',
+        margin: '16px 0',
+      }}
     />
   )
 }
@@ -4181,9 +4243,10 @@ export default function App() {
       return (
         <div>
           {/* Summary panel — inner sections 에 section-overview/showme/concepts/timeline/qa anchor.
-              collapsed 시 TOC 클릭하면 자동 expand. */}
+              key={lectureId} 로 강제 remount → 강의 전환 시 옛 ShowMe content 즉시 unmount. */}
           {showSummary && (
             <SummaryPanel
+              key={selected.id}
               lectureId={selected.id}
               summary={selected.summary!}
               onTimestampClick={scrollToSegment}
@@ -4200,10 +4263,12 @@ export default function App() {
             </div>
           )}
 
-          {/* Comprehensive Notes (강의 정리) — anchor: section-notes. Claude 단독 */}
+          {/* Comprehensive Notes (강의 정리) — anchor: section-notes. Claude 단독.
+              key={lectureId} 로 강의 전환 시 강제 remount. */}
           {selected.summary && (selected.summary.notes_claude || selected.summary.notes_gpt) && (
             <div id="section-notes" style={{ scrollMarginTop: 50 }}>
               <NotesSection
+                key={selected.id}
                 lectureId={selected.id}
                 notesClaude={selected.summary.notes_claude ?? ''}
                 models={selected.summary.models}
