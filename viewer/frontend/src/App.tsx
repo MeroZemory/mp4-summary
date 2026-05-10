@@ -1394,34 +1394,44 @@ function SummaryPanel({
 
       {!collapsed && (
         <div>
-          {/* Overview / ShowMe — anchor: section-overview + section-showme (같은 영역) */}
-          <div id="section-overview" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100">
-            <div id="section-showme" />
-            {(summary.show_me_gpt || summary.show_me_claude) ? (
+          {/* Overview — 항상 표시 (짧은 텍스트 요약) */}
+          {(summary.overview.title || summary.overview.summary) && (
+            <div id="section-overview" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100">
+              <OverviewCard overview={summary.overview} />
+            </div>
+          )}
+
+          {/* Key Concepts — anchor: section-concepts (single column) */}
+          {summary.key_concepts.length > 0 && (
+            <div id="section-concepts" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
+              <KeyConceptsList concepts={summary.key_concepts} onTimestampClick={onTimestampClick} />
+            </div>
+          )}
+
+          {/* Timeline — anchor: section-timeline (single column, 별도 섹션) */}
+          {summary.timeline.length > 0 && (
+            <div id="section-timeline" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
+              <TimelineList timeline={summary.timeline} onTimestampClick={onTimestampClick} />
+            </div>
+          )}
+
+          {/* ShowMe — anchor: section-showme. HTML+SVG 시각화 (있을 때만) */}
+          {(summary.show_me_gpt || summary.show_me_claude) && (
+            <div id="section-showme" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100">
               <ShowMe
                 lectureId={lectureId}
                 showMeClaude={summary.show_me_claude ?? ''}
                 models={summary.models}
               />
-            ) : (
-              <OverviewCard overview={summary.overview} />
-            )}
-          </div>
-
-          {/* Two-column grid: Key Concepts (id=section-concepts) + Timeline (id=section-timeline) */}
-          <div className="border-t border-slate-100 px-5 py-4 grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <div id="section-concepts" style={{ scrollMarginTop: 50 }}>
-              <KeyConceptsList concepts={summary.key_concepts} onTimestampClick={onTimestampClick} />
             </div>
-            <div id="section-timeline" style={{ scrollMarginTop: 50 }}>
-              <TimelineList timeline={summary.timeline} onTimestampClick={onTimestampClick} />
-            </div>
-          </div>
+          )}
 
           {/* Study Guide — anchor: section-qa */}
-          <div id="section-qa" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
-            <StudyGuide items={summary.study_guide} onTimestampClick={onTimestampClick} />
-          </div>
+          {summary.study_guide.length > 0 && (
+            <div id="section-qa" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
+              <StudyGuide items={summary.study_guide} onTimestampClick={onTimestampClick} />
+            </div>
+          )}
 
         </div>
       )}
