@@ -837,6 +837,34 @@ export function RegenProvider({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<Map<RegenKey, string>>(() => new Map())
   const [completionCounters, setCompletionCounters] = useState<Map<RegenKey, number>>(() => new Map())
 
+  // 마운트 시 backend 에서 진행 중인 regen jobs 를 시드 — 새로고침 후 polling 재개
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/regen/active')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: { job_id: string; lecture_id: string; module: ModuleName; model_kind: ModelKindName }[]) => {
+        if (cancelled || list.length === 0) return
+        setActive((prev) => {
+          const next = new Map(prev)
+          for (const item of list) {
+            const key = regenKeyOf(item.lecture_id, item.module, item.model_kind)
+            // 이미 추적 중이면 덮어쓰지 않음 (start() 가 set 한 게 우선)
+            if (!next.has(key)) {
+              next.set(key, {
+                lectureId: item.lecture_id,
+                module: item.module,
+                modelKind: item.model_kind,
+                jobId: item.job_id,
+              })
+            }
+          }
+          return next
+        })
+      })
+      .catch(() => { /* 인증 미완료 등 — 무시 */ })
+    return () => { cancelled = true }
+  }, [])
+
   // active 가 하나라도 있으면 단일 polling interval 로 모두 확인
   useEffect(() => {
     if (active.size === 0) return
@@ -3201,7 +3229,7 @@ function LectureGroups({
 // ─── Upload Panel (sidebar section) ─────────────────────
 
 type JobStatus = 'queued' | 'processing' | 'awaiting_domain' | 'completed' | 'failed' | 'canceled'
-type JobType = 'full' | 'stt' | 'correct' | 'summary'
+type JobType = 'full' | 'stt' | 'correct' | 'summary' | 'regen'
 type Job = {
   id: string
   filename: string
@@ -3265,11 +3293,12 @@ function UploadPanel({
       if (!res.ok) return
       const data: Job[] = await res.json()
       setJobs(data)
-      // 초기 로드의 completed는 새 완료로 카운트하지 않음
+      // 초기 로드의 completed는 새 완료로 카운트하지 않음.
+      // regen 은 업로드와 무관하므로 "새 강의 완료" 배너 카운트에서도 제외.
       const nextCompletedSet = new Set(knownCompletedRef.current)
       let newCompletions = 0
       for (const j of data) {
-        if (j.status === 'completed' && !nextCompletedSet.has(j.id)) {
+        if (j.status === 'completed' && j.job_type !== 'regen' && !nextCompletedSet.has(j.id)) {
           nextCompletedSet.add(j.id)
           if (!initialLoadRef.current) newCompletions += 1
         }
@@ -3355,9 +3384,12 @@ function UploadPanel({
     } catch {}
   }, [loadJobs])
 
-  const activeCount = jobs.filter((j) => !TERMINAL_STATUSES.has(j.status)).length
+  // 업로드 패널은 업로드 파이프라인(full/stt/correct/summary)만 다룸.
+  // 'regen' 은 강의+모델 단위의 ShowMe/Notes 재생성이라 별개 — 카운트·list 모두 제외.
+  const uploadJobs = jobs.filter((j) => j.job_type !== 'regen')
+  const activeCount = uploadJobs.filter((j) => !TERMINAL_STATUSES.has(j.status)).length
   // 완료/취소된 작업은 list 에서 숨김 (완료는 배너로 안내, 실패는 표시 유지)
-  const displayJobs = jobs
+  const displayJobs = uploadJobs
     .filter((j) => j.status !== 'completed' && j.status !== 'canceled')
     .slice(0, 8)
 

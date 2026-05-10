@@ -243,6 +243,43 @@ class RegenModelsResponse(BaseModel):
 
 # ── API 엔드포인트 ──────────────────────────────────────────────────────────
 
+class ActiveRegenItem(BaseModel):
+    job_id: str
+    lecture_id: str
+    module: str
+    model_kind: str
+
+
+@router.get("/regen/active", response_model=list[ActiveRegenItem])
+async def list_active_regens(user: dict = Depends(require_user)) -> list[ActiveRegenItem]:
+    """현재 user 의 진행 중인 regen jobs (frontend 새로고침 후 polling 재개용)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, lecture_id, regen_module, regen_model_kind
+            FROM jobs
+            WHERE user_id = $1
+              AND job_type = 'regen'
+              AND status IN ('queued','processing')
+              AND lecture_id IS NOT NULL
+              AND regen_module IS NOT NULL
+              AND regen_model_kind IS NOT NULL
+            ORDER BY created_at DESC
+            """,
+            uuid.UUID(user["id"]),
+        )
+    return [
+        ActiveRegenItem(
+            job_id=str(r["id"]),
+            lecture_id=r["lecture_id"],
+            module=r["regen_module"],
+            model_kind=r["regen_model_kind"],
+        )
+        for r in rows
+    ]
+
+
 @router.get("/regen-models", response_model=RegenModelsResponse)
 async def get_regen_models(_user: dict = Depends(require_user)) -> RegenModelsResponse:
     return RegenModelsResponse(
