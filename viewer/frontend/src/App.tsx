@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { DomainPicker } from './components/DomainPicker'
+import { HybridShell } from './components/HybridShell'
 import {
   groupLecturesByDomain,
   postLectureDomain,
@@ -218,7 +219,8 @@ function CheckIcon() {
   )
 }
 
-function MenuIcon() {
+// 모바일 햄버거 — 디자인 3/3 단계에서 메인 영역 메타바로 옮겨질 예정
+export function MenuIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
@@ -3056,7 +3058,8 @@ interface LectureGroupsProps {
   onSelect: (id: string) => void
 }
 
-function LectureGroups({
+// TODO(design 3/3): HybridShell 의 lecture tree 가 대체. 다음 단계에서 제거.
+export function LectureGroups({
   groups,
   entries,
   search,
@@ -3518,7 +3521,6 @@ export default function App() {
   const [contentSearch, setContentSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('corrected')
   const [copied, setCopied] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [summaryCollapsed, setSummaryCollapsed] = useState(false)
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true)
   const [chatOpen, setChatOpen] = useState(false)
@@ -3543,14 +3545,6 @@ export default function App() {
   // Lectures + domains fetched from server (도메인 그루핑용)
   const [lectures, setLectures] = useState<Lecture[]>([])
   const [domains, setDomains] = useState<DomainInfo[]>([])
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
-    try {
-      const stored = localStorage.getItem('lectures.collapsedGroups')
-      return stored ? new Set<string>(JSON.parse(stored)) : new Set<string>()
-    } catch {
-      return new Set<string>()
-    }
-  })
   const refreshLecturesAndDomains = useCallback(async () => {
     try {
       const [lr, dr] = await Promise.all([
@@ -3573,28 +3567,6 @@ export default function App() {
     const id = setInterval(refreshLecturesAndDomains, 5000)
     return () => clearInterval(id)
   }, [lectures, refreshLecturesAndDomains])
-
-  const lectureGroups = useMemo(
-    () => groupLecturesByDomain(lectures, domains),
-    [lectures, domains],
-  )
-
-  const toggleGroup = useCallback((key: string) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      try {
-        localStorage.setItem(
-          'lectures.collapsedGroups',
-          JSON.stringify(Array.from(next)),
-        )
-      } catch {
-        /* localStorage 비활성 환경 무시 */
-      }
-      return next
-    })
-  }, [])
 
   const handleDomainConfirm = useCallback(
     async (lectureId: string, domainId: string) => {
@@ -3669,7 +3641,6 @@ export default function App() {
     contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
     setContentSearch('')
     setViewMode('corrected')
-    setSidebarOpen(false)
     setSummaryCollapsed(false)
     setTranscriptCollapsed(true)
     setContextMenu(null)
@@ -4066,12 +4037,6 @@ export default function App() {
       {/* Header */}
       <header className="shrink-0 h-12 border-b border-slate-200/80 bg-white px-4 flex items-center justify-between z-30">
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="lg:hidden p-1 -ml-1 text-slate-400 hover:text-slate-600 transition-colors"
-          >
-            <MenuIcon />
-          </button>
           <h1 className="text-[15px] font-bold text-slate-800 tracking-tight">강의 녹취록</h1>
           <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
             <span className="bg-slate-100 rounded-full px-2 py-0.5">{entries.length}개 강의</span>
@@ -4105,86 +4070,52 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* Mobile overlay */}
-        {sidebarOpen && (
-          <div
-            className="fixed inset-0 bg-black/20 backdrop-blur-[1px] z-40 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
-
-        {/* Sidebar */}
-        <aside
-          className={`
-            fixed lg:static inset-y-0 left-0 z-50
-            w-64 bg-white border-r border-slate-200/80
-            flex flex-col overflow-hidden
-            transition-transform duration-200 ease-out
-            ${sidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}
-            lg:translate-x-0 lg:shadow-none
-          `}
-        >
-          {/* Search */}
-          <div className="shrink-0 p-3 border-b border-slate-100">
-            <div className="relative">
-              <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-350 w-3.5 h-3.5" />
-              <input
-                ref={searchRef}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="강의 검색..."
-                className="w-full pl-8 pr-8 py-2 text-[13px] bg-slate-50 border border-transparent rounded-lg outline-none focus:bg-white focus:border-teal-300 focus:ring-2 focus:ring-teal-100 transition placeholder:text-slate-400"
+      <div className="flex-1 overflow-hidden relative">
+        <HybridShell
+          activeNav="lectures"
+          activeLectureId={selected?.id ?? null}
+          lectures={lectures}
+          domains={domains}
+          insightsBadge={pendingCount}
+          userInitials={
+            currentUser?.display_name
+              ? currentUser.display_name.trim().charAt(0).toUpperCase()
+              : currentUser?.email
+                ? currentUser.email.charAt(0).toUpperCase()
+                : 'U'
+          }
+          userName={currentUser?.display_name || currentUser?.email}
+          onLectureSelect={setSelectedId}
+          onLogoutClick={async () => {
+            await fetch('/api/auth/logout', { method: 'POST' })
+            window.location.href = '/login'
+          }}
+          search={search}
+          onSearchChange={setSearch}
+          auxiliarySlot={
+            <>
+              <UploadPanel
+                lectures={lectures}
+                domains={domains}
+                onConfirmDomain={handleDomainConfirm}
+                onJobChanged={refreshLecturesAndDomains}
               />
-              {search && (
-                <button
-                  onClick={() => setSearch('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500 transition-colors"
-                >
-                  <XIcon />
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Entry list — 도메인별 그룹 + 검색 */}
-          <nav className="flex-1 overflow-y-auto px-2 py-2 scrollbar-thin">
-            <LectureGroups
-              groups={lectureGroups}
-              entries={entries}
-              search={search}
-              selectedId={selected?.id ?? ''}
-              collapsedGroups={collapsedGroups}
-              onToggleGroup={toggleGroup}
-              onSelect={setSelectedId}
-            />
-          </nav>
-
-          {/* Upload panel */}
-          <UploadPanel
-            lectures={lectures}
-            domains={domains}
-            onConfirmDomain={handleDomainConfirm}
-            onJobChanged={refreshLecturesAndDomains}
-          />
-
-          {/* Bookmarks panel */}
-          <BookmarksPanel
-            bookmarks={bookmarks}
-            onScrollTo={scrollToSegment}
-            onDelete={handleBookmarkDelete}
-          />
-
-          {/* Insights panel */}
-          <InsightsPanel
-            insights={insights}
-            onDelete={handleInsightDelete}
-            pendingCount={pendingCount}
-            onOpenBatchReview={() => setBatchReviewOpen(true)}
-          />
-        </aside>
-
-        {/* Content */}
+              <BookmarksPanel
+                bookmarks={bookmarks}
+                onScrollTo={scrollToSegment}
+                onDelete={handleBookmarkDelete}
+              />
+              <InsightsPanel
+                insights={insights}
+                onDelete={handleInsightDelete}
+                pendingCount={pendingCount}
+                onOpenBatchReview={() => setBatchReviewOpen(true)}
+              />
+            </>
+          }
+        >
+        {/* Content row — main viewer + 우측 chat panel */}
+        <div className="flex-1 flex overflow-hidden relative" style={{ minHeight: 0 }}>
         <main className="flex-1 flex flex-col overflow-hidden relative">
           {/* Content toolbar — title + domain badge + copy */}
           {selected && (
@@ -4313,6 +4244,8 @@ export default function App() {
             />
           </>
         )}
+        </div>
+        </HybridShell>
       </div>
 
       {/* Context menu */}

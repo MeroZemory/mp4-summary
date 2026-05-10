@@ -76,8 +76,14 @@ export interface HybridShellProps {
   onNavSelect?: (k: ShellNavKey) => void
   onLectureSelect?: (lectureId: string) => void
   onSettingsClick?: () => void
+  onLogoutClick?: () => void
   search?: string
   onSearchChange?: (v: string) => void
+  /**
+   * 사이드바 lecture tree 아래, user footer 위에 들어가는 추가 영역.
+   * 운영 패널 (Upload / Bookmarks / Insights 등) 통합용.
+   */
+  auxiliarySlot?: ReactNode
   children: ReactNode
 }
 
@@ -92,8 +98,10 @@ export function HybridShell({
   onNavSelect,
   onLectureSelect,
   onSettingsClick,
+  onLogoutClick,
   search = '',
   onSearchChange,
+  auxiliarySlot,
   children,
 }: HybridShellProps) {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -303,6 +311,13 @@ export function HybridShell({
           )}
         </div>
 
+        {/* Auxiliary slot — 운영 패널 (Upload / Bookmarks / Insights) */}
+        {!collapsed && auxiliarySlot && (
+          <div style={{ borderTop: '1px solid var(--border)', maxHeight: '50%', overflowY: 'auto' }} className="scrollbar-thin">
+            {auxiliarySlot}
+          </div>
+        )}
+
         {/* User footer */}
         <div
           style={{
@@ -345,15 +360,30 @@ export function HybridShell({
               >
                 {userName ?? '사용자'}
               </div>
-              <button
-                onClick={onSettingsClick}
-                className="ds-btn ghost sm"
-                style={{ padding: '0 4px' }}
-                title="설정"
-                aria-label="설정"
-              >
-                <ShellIcon name="settings" />
-              </button>
+              {onSettingsClick && (
+                <button
+                  onClick={onSettingsClick}
+                  className="ds-btn ghost sm"
+                  style={{ padding: '0 4px' }}
+                  title="설정"
+                  aria-label="설정"
+                >
+                  <ShellIcon name="settings" />
+                </button>
+              )}
+              {onLogoutClick && (
+                <button
+                  onClick={onLogoutClick}
+                  className="ds-btn ghost sm"
+                  style={{ padding: '0 4px' }}
+                  title="로그아웃"
+                  aria-label="로그아웃"
+                >
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+                  </svg>
+                </button>
+              )}
             </>
           )}
         </div>
