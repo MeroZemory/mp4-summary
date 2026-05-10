@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -809,32 +809,136 @@ type VersionsResponse = {
   notes: { gpt: VersionMeta[]; claude: VersionMeta[] }
 }
 
-type RegenModels = {
-  gpt: string[]
-  claude: string[]
-  defaults: { gpt: string; claude: string }
+// ─── Global Regen store ─────────────────────────────────
+// 강의 × (module, model_kind) 슬롯 단위 polling. 컴포넌트 unmount 또는
+// 모델 토글 변경에도 진행 중인 재생성 작업을 잃지 않는다.
+
+type RegenKey = string  // `${lectureId}|${module}|${modelKind}`
+
+function regenKeyOf(lectureId: string, module: ModuleName, modelKind: ModelKindName): RegenKey {
+  return `${lectureId}|${module}|${modelKind}`
 }
 
-function useRegenModels() {
-  const [models, setModels] = useState<RegenModels | null>(null)
+type ActiveRegen = { lectureId: string; module: ModuleName; modelKind: ModelKindName; jobId: string }
+
+type RegenContextValue = {
+  active: ReadonlyMap<RegenKey, ActiveRegen>
+  errors: ReadonlyMap<RegenKey, string>
+  // 슬롯이 완료될 때마다 카운터 증가 → 컴포넌트가 versions refetch 트리거로 사용
+  completionCounters: ReadonlyMap<RegenKey, number>
+  start: (lectureId: string, module: ModuleName, modelKind: ModelKindName) => Promise<void>
+  clearError: (lectureId: string, module: ModuleName, modelKind: ModelKindName) => void
+}
+
+const RegenContext = createContext<RegenContextValue | null>(null)
+
+export function RegenProvider({ children }: { children: ReactNode }) {
+  const [active, setActive] = useState<Map<RegenKey, ActiveRegen>>(() => new Map())
+  const [errors, setErrors] = useState<Map<RegenKey, string>>(() => new Map())
+  const [completionCounters, setCompletionCounters] = useState<Map<RegenKey, number>>(() => new Map())
+
+  // active 가 하나라도 있으면 단일 polling interval 로 모두 확인
   useEffect(() => {
+    if (active.size === 0) return
     let cancelled = false
-    fetch('/api/regen-models')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data: RegenModels) => { if (!cancelled) setModels(data) })
-      .catch(() => { /* ignore — popover에서 default만 표시 */ })
-    return () => { cancelled = true }
+    const tick = async () => {
+      const snapshot = Array.from(active.entries())
+      for (const [key, regen] of snapshot) {
+        try {
+          const res = await fetch(`/api/jobs/${regen.jobId}`)
+          if (!res.ok) continue
+          const j: { status: string; error_message: string | null } = await res.json()
+          if (cancelled) return
+          if (j.status === 'completed') {
+            setActive((prev) => {
+              if (!prev.has(key)) return prev
+              const next = new Map(prev); next.delete(key); return next
+            })
+            setCompletionCounters((prev) => {
+              const next = new Map(prev); next.set(key, (prev.get(key) ?? 0) + 1); return next
+            })
+            setErrors((prev) => {
+              if (!prev.has(key)) return prev
+              const next = new Map(prev); next.delete(key); return next
+            })
+          } else if (j.status === 'failed' || j.status === 'canceled') {
+            setActive((prev) => {
+              if (!prev.has(key)) return prev
+              const next = new Map(prev); next.delete(key); return next
+            })
+            setErrors((prev) => {
+              const next = new Map(prev)
+              next.set(key, j.error_message || `재생성 ${j.status}`)
+              return next
+            })
+          }
+        } catch {
+          // 네트워크 일시 오류 — 다음 tick 에 재시도
+        }
+      }
+    }
+    const interval = window.setInterval(tick, 2000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [active])
+
+  const start = useCallback(async (lectureId: string, module: ModuleName, modelKind: ModelKindName) => {
+    const key = regenKeyOf(lectureId, module, modelKind)
+    setErrors((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Map(prev); next.delete(key); return next
+    })
+    try {
+      const res = await fetch(`/api/lectures/${encodeURIComponent(lectureId)}/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module, model_kind: modelKind }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { detail?: string }
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const data: { job_id: string } = await res.json()
+      setActive((prev) => {
+        const next = new Map(prev)
+        next.set(key, { lectureId, module, modelKind, jobId: data.job_id })
+        return next
+      })
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e)
+      setErrors((prev) => {
+        const next = new Map(prev); next.set(key, message); return next
+      })
+    }
   }, [])
-  return models
+
+  const clearError = useCallback((lectureId: string, module: ModuleName, modelKind: ModelKindName) => {
+    const key = regenKeyOf(lectureId, module, modelKind)
+    setErrors((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Map(prev); next.delete(key); return next
+    })
+  }, [])
+
+  const value = useMemo(
+    () => ({ active, errors, completionCounters, start, clearError }),
+    [active, errors, completionCounters, start, clearError],
+  )
+  return <RegenContext.Provider value={value}>{children}</RegenContext.Provider>
 }
 
-type SlotState = {
+function useRegen(): RegenContextValue {
+  const ctx = useContext(RegenContext)
+  if (!ctx) throw new Error('useRegen must be used inside <RegenProvider>')
+  return ctx
+}
+
+// ─── Slot hook (글로벌 store 위에서 동작) ──────────────
+
+type SlotLocalState = {
   versions: VersionMeta[]
-  selectedVersion: number | null  // null이면 fallback (baseline) 콘텐츠 표시
+  selectedVersion: number | null
   content: string
   isLoading: boolean
-  regenJobId: string | null
-  regenError: string | null
 }
 
 function useModuleVersions(
@@ -843,16 +947,20 @@ function useModuleVersions(
   modelKind: ModelKindName,
   fallbackContent: string,
 ) {
-  const [state, setState] = useState<SlotState>({
+  const ctx = useRegen()
+  const key = regenKeyOf(lectureId, module, modelKind)
+  const isRegenerating = ctx.active.has(key)
+  const regenError = ctx.errors.get(key) ?? null
+  const completionCounter = ctx.completionCounters.get(key) ?? 0
+
+  const [state, setState] = useState<SlotLocalState>({
     versions: [],
     selectedVersion: null,
     content: fallbackContent,
     isLoading: false,
-    regenJobId: null,
-    regenError: null,
   })
 
-  // 모델 토글이 바뀌면 fallback도 바뀜 — versions 재조회 트리거
+  // versions 메타 fetch — 슬롯 식별자나 완료 카운터가 바뀌면 재조회 (재생성 직후 새 v 가 노출되도록)
   useEffect(() => {
     let cancelled = false
     fetch(`/api/lectures/${encodeURIComponent(lectureId)}/versions`)
@@ -865,24 +973,23 @@ function useModuleVersions(
           ...s,
           versions: slot,
           selectedVersion: latest,
-          // versions 가 비어있을 때만 fallbackContent 사용
           content: latest === null ? fallbackContent : s.content,
         }))
       })
       .catch(() => {
-        // 실패 시 fallback 콘텐츠로 동작
+        if (cancelled) return
         setState((s) => ({ ...s, versions: [], selectedVersion: null, content: fallbackContent }))
       })
     return () => { cancelled = true }
-  }, [lectureId, module, modelKind, fallbackContent])
+  }, [lectureId, module, modelKind, fallbackContent, completionCounter])
 
-  // 선택된 버전 콘텐츠 fetch
+  // 선택 버전 콘텐츠 fetch
   useEffect(() => {
     if (state.selectedVersion === null) return
     let cancelled = false
     setState((s) => ({ ...s, isLoading: true }))
     fetch(
-      `/api/lectures/${encodeURIComponent(lectureId)}/versions/${module}/${modelKind}/${state.selectedVersion}`
+      `/api/lectures/${encodeURIComponent(lectureId)}/versions/${module}/${modelKind}/${state.selectedVersion}`,
     )
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data: { content: string }) => {
@@ -896,81 +1003,28 @@ function useModuleVersions(
     return () => { cancelled = true }
   }, [lectureId, module, modelKind, state.selectedVersion])
 
-  // regen 폴링
-  useEffect(() => {
-    const jobId = state.regenJobId
-    if (!jobId) return
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/jobs/${jobId}`)
-        if (!res.ok) return
-        const job: { status: string; error_message: string | null } = await res.json()
-        if (cancelled) return
-        if (job.status === 'completed') {
-          const r2 = await fetch(`/api/lectures/${encodeURIComponent(lectureId)}/versions`)
-          if (!r2.ok) return
-          const data: VersionsResponse = await r2.json()
-          if (cancelled) return
-          const slot = data[module][modelKind] ?? []
-          const newLatest = slot.length > 0 ? slot[0].version : null
-          setState((s) => ({
-            ...s,
-            versions: slot,
-            selectedVersion: newLatest,
-            regenJobId: null,
-            regenError: null,
-          }))
-        } else if (job.status === 'failed' || job.status === 'canceled') {
-          setState((s) => ({
-            ...s,
-            regenJobId: null,
-            regenError: job.error_message || `재생성 ${job.status}`,
-          }))
-        }
-      } catch {
-        // 네트워크 일시 오류 — 다음 tick 에서 재시도
-      }
-    }
-    const interval = window.setInterval(tick, 2000)
-    return () => { cancelled = true; window.clearInterval(interval) }
-  }, [state.regenJobId, lectureId, module, modelKind])
-
-  const triggerRegen = useCallback(async (modelId: string): Promise<boolean> => {
-    setState((s) => ({ ...s, regenError: null }))
-    try {
-      const res = await fetch(`/api/lectures/${encodeURIComponent(lectureId)}/regenerate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ module, model_kind: modelKind, model_id: modelId }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({})) as { detail?: string }
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
-      const data: { job_id: string } = await res.json()
-      setState((s) => ({ ...s, regenJobId: data.job_id }))
-      return true
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e)
-      setState((s) => ({ ...s, regenError: message }))
-      return false
-    }
-  }, [lectureId, module, modelKind])
+  const triggerRegen = useCallback(async (): Promise<void> => {
+    await ctx.start(lectureId, module, modelKind)
+  }, [ctx, lectureId, module, modelKind])
 
   const setSelectedVersion = useCallback((v: number | null) => {
     setState((s) => ({ ...s, selectedVersion: v }))
   }, [])
+
+  const dismissError = useCallback(() => {
+    ctx.clearError(lectureId, module, modelKind)
+  }, [ctx, lectureId, module, modelKind])
 
   return {
     versions: state.versions,
     selectedVersion: state.selectedVersion,
     content: state.content,
     isLoading: state.isLoading,
-    isRegenerating: state.regenJobId !== null,
-    regenError: state.regenError,
+    isRegenerating,
+    regenError,
     triggerRegen,
     setSelectedVersion,
+    dismissError,
   }
 }
 
@@ -1001,72 +1055,34 @@ function VersionDropdown({
 }
 
 function RegenButton({
-  regenModels, modelKind, isRegenerating, onTrigger,
+  isRegenerating, onTrigger,
 }: {
-  regenModels: RegenModels | null
-  modelKind: ModelKindName
   isRegenerating: boolean
-  onTrigger: (modelId: string) => Promise<boolean>
+  onTrigger: () => Promise<void>
 }) {
-  const [open, setOpen] = useState(false)
-  const candidates = regenModels?.[modelKind] ?? []
-  const defaultModel = regenModels?.defaults[modelKind] ?? candidates[0] ?? ''
-  const [selected, setSelected] = useState<string>(defaultModel)
-  useEffect(() => { if (defaultModel) setSelected(defaultModel) }, [defaultModel])
-
   return (
-    <div className="relative inline-block">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        disabled={isRegenerating}
-        className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition flex items-center gap-1.5 ${
-          isRegenerating
-            ? 'bg-amber-100 text-amber-700 cursor-wait'
-            : 'bg-teal-50 text-teal-700 hover:bg-teal-100'
-        }`}
-        title="새 버전 생성"
-      >
-        {isRegenerating ? (
-          <>
-            <span className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-            <span>재생성 중…</span>
-          </>
-        ) : (
-          <>
-            <span>↻</span>
-            <span>재생성</span>
-          </>
-        )}
-      </button>
-      {open && !isRegenerating && (
-        <div
-          className="absolute right-0 top-full mt-1 z-20 bg-white rounded-xl shadow-lg border border-slate-200 p-3 min-w-[240px]"
-          onMouseLeave={() => setOpen(false)}
-        >
-          <label className="block text-[11px] font-medium text-slate-500 mb-1.5">모델 선택</label>
-          <select
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-            className="w-full text-[12px] bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 mb-2"
-          >
-            {candidates.length === 0 && defaultModel && (
-              <option value={defaultModel}>{defaultModel}</option>
-            )}
-            {candidates.map((m) => (<option key={m} value={m}>{m}</option>))}
-          </select>
-          <button
-            onClick={async () => {
-              if (!selected) return
-              const ok = await onTrigger(selected)
-              if (ok) setOpen(false)
-            }}
-            className="w-full px-3 py-1.5 rounded-md bg-teal-600 hover:bg-teal-700 text-white text-[12px] font-medium transition"
-          >
-            새 버전 생성
-          </button>
-        </div>
+    <button
+      onClick={() => { void onTrigger() }}
+      disabled={isRegenerating}
+      className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition flex items-center gap-1.5 ${
+        isRegenerating
+          ? 'bg-amber-100 text-amber-700 cursor-wait'
+          : 'bg-teal-50 text-teal-700 hover:bg-teal-100'
+      }`}
+      title="현재 토글된 모델로 새 버전 생성"
+    >
+      {isRegenerating ? (
+        <>
+          <span className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+          <span>재생성 중…</span>
+        </>
+      ) : (
+        <>
+          <span>↻</span>
+          <span>재생성</span>
+        </>
       )}
-    </div>
+    </button>
   )
 }
 
@@ -1075,13 +1091,11 @@ function ShowMe({
   showMeGpt,
   showMeClaude,
   models,
-  regenModels,
 }: {
   lectureId: string
   showMeGpt: string
   showMeClaude: string
   models?: LectureSummary['models']
-  regenModels: RegenModels | null
 }) {
   const hasGpt = showMeGpt.length > 0
   const hasClaude = showMeClaude.length > 0
@@ -1147,8 +1161,6 @@ function ShowMe({
           />
 
           <RegenButton
-            regenModels={regenModels}
-            modelKind={model}
             isRegenerating={slot.isRegenerating}
             onTrigger={slot.triggerRegen}
           />
@@ -1283,14 +1295,12 @@ function SummaryPanel({
   onTimestampClick,
   collapsed,
   onToggleCollapse,
-  regenModels,
 }: {
   lectureId: string
   summary: LectureSummary
   onTimestampClick: (time: string) => void
   collapsed: boolean
   onToggleCollapse: () => void
-  regenModels: RegenModels | null
 }) {
   return (
     <div className="border-b border-slate-200/80">
@@ -1316,7 +1326,6 @@ function SummaryPanel({
                 showMeGpt={summary.show_me_gpt ?? ''}
                 showMeClaude={summary.show_me_claude ?? ''}
                 models={summary.models}
-                regenModels={regenModels}
               />
             ) : (
               <OverviewCard overview={summary.overview} />
@@ -1341,13 +1350,12 @@ function SummaryPanel({
 }
 
 function NotesSection({
-  lectureId, notesGpt, notesClaude, models, regenModels,
+  lectureId, notesGpt, notesClaude, models,
 }: {
   lectureId: string
   notesGpt: string
   notesClaude: string
   models?: LectureSummary['models']
-  regenModels: RegenModels | null
 }) {
   const hasGpt = notesGpt.length > 0
   const hasClaude = notesClaude.length > 0
@@ -1406,8 +1414,6 @@ function NotesSection({
             />
 
             <RegenButton
-              regenModels={regenModels}
-              modelKind={model}
               isRegenerating={slot.isRegenerating}
               onTrigger={slot.triggerRegen}
             />
@@ -3539,9 +3545,6 @@ export default function App() {
     fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(setCurrentUser).catch(() => {})
   }, [])
 
-  // 모듈 재생성용 모델 후보 — 한 번만 fetch, 모든 강의가 공유
-  const regenModels = useRegenModels()
-
   // Lectures + domains fetched from server (도메인 그루핑용)
   const [lectures, setLectures] = useState<Lecture[]>([])
   const [domains, setDomains] = useState<DomainInfo[]>([])
@@ -3870,7 +3873,6 @@ export default function App() {
               onTimestampClick={scrollToSegment}
               collapsed={summaryCollapsed}
               onToggleCollapse={() => setSummaryCollapsed((v) => !v)}
-              regenModels={regenModels}
             />
           )}
 
@@ -3889,7 +3891,6 @@ export default function App() {
               notesGpt={selected.summary.notes_gpt ?? ''}
               notesClaude={selected.summary.notes_claude ?? ''}
               models={selected.summary.models}
-              regenModels={regenModels}
             />
           )}
 

@@ -341,15 +341,19 @@ async def regenerate(lecture_id: str, body: RegenerateRequest,
     if body.module not in VALID_MODULES or body.model_kind not in VALID_MODEL_KINDS:
         raise HTTPException(status_code=400, detail="Invalid module or model_kind")
 
-    candidates = (
-        GPT_MODEL_CANDIDATES if body.model_kind == "gpt" else CLAUDE_MODEL_CANDIDATES
-    )
-    model_id = body.model_id or _default_model_id(body.model_kind)
-    if model_id not in candidates:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown model_id '{model_id}' for {body.model_kind}",
+    if body.model_id is not None:
+        candidates = (
+            GPT_MODEL_CANDIDATES if body.model_kind == "gpt" else CLAUDE_MODEL_CANDIDATES
         )
+        if body.model_id not in candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown model_id '{body.model_id}' for {body.model_kind}",
+            )
+        model_id = body.model_id
+    else:
+        # frontend 가 토글된 GPT/Opus 의 env default 모델로 트리거 — 검증 우회
+        model_id = _default_model_id(body.model_kind)
 
     pool = await get_pool()
     async with pool.acquire() as conn:
