@@ -3512,6 +3512,109 @@ function UploadPanel({
 
 // ─── App ────────────────────────────────────────────────
 
+// ─── Sticky Anchor TOC (design D · Hybrid) ───────────────────────
+//
+// 강의 reader 의 sticky 칩 nav. 클릭 시 해당 섹션으로 부드럽게 점프하고
+// 스크롤 위치에 따라 활성 칩이 자동 변경.
+
+const READER_TOC_ITEMS = [
+  { k: 'summary', label: 'Summary', ico: 'sparkle' },
+  { k: 'notes', label: '강의 정리', ico: 'list' },
+  { k: 'transcript', label: '전사', ico: 'doc' },
+] as const
+
+type ReaderTocKey = typeof READER_TOC_ITEMS[number]['k']
+
+function TocChipIcon({ name }: { name: string }) {
+  const ICONS: Record<string, string> = {
+    sparkle: 'M12 3v6M12 15v6M3 12h6M15 12h6M5 5l4 4M15 15l4 4M5 19l4-4M15 9l4-4',
+    list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+    doc: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6',
+  }
+  const d = ICONS[name] || ICONS.sparkle
+  return (
+    <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+      <path d={d} />
+    </svg>
+  )
+}
+
+function AnchorToc({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement> }) {
+  const [active, setActive] = useState<ReaderTocKey>('summary')
+
+  useEffect(() => {
+    const root = scrollRef.current
+    if (!root) return
+    const onScroll = () => {
+      const y = root.scrollTop + 80
+      let current: ReaderTocKey = READER_TOC_ITEMS[0].k
+      for (const t of READER_TOC_ITEMS) {
+        const el = root.querySelector<HTMLElement>('#section-' + t.k)
+        if (el && el.offsetTop <= y) current = t.k
+      }
+      setActive(current)
+    }
+    onScroll()
+    root.addEventListener('scroll', onScroll, { passive: true })
+    return () => root.removeEventListener('scroll', onScroll)
+  }, [scrollRef])
+
+  const jumpTo = (k: ReaderTocKey) => {
+    const root = scrollRef.current
+    if (!root) return
+    const el = root.querySelector<HTMLElement>('#section-' + k)
+    if (!el) return
+    root.scrollTo({ top: el.offsetTop - 12, behavior: 'smooth' })
+    setActive(k)
+  }
+
+  return (
+    <div
+      className="shrink-0"
+      style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 5,
+        padding: '0 24px',
+        borderBottom: '1px solid var(--border)',
+        background: 'rgba(255,255,255,0.92)',
+        backdropFilter: 'blur(8px)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        height: 36,
+      }}
+    >
+      {READER_TOC_ITEMS.map((t) => {
+        const isActive = active === t.k
+        return (
+          <button
+            key={t.k}
+            onClick={() => jumpTo(t.k)}
+            style={{
+              height: 28,
+              padding: '0 10px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 12,
+              fontWeight: isActive ? 600 : 500,
+              color: isActive ? 'var(--accent-deep)' : 'var(--text-3)',
+              background: isActive ? 'var(--accent-tint)' : 'transparent',
+              borderRadius: 6,
+              border: 0,
+              cursor: 'pointer',
+            }}
+          >
+            <TocChipIcon name={t.ico} />
+            {t.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── Nav placeholder 화면 (강의 / 학습 노트 / 북마크 / 도메인) ──────
 //
 // 메인 viewer 의 D · Hybrid reader 재구성은 다음 PR. 그 전까지 4개 nav
@@ -4058,15 +4161,17 @@ export default function App() {
 
       return (
         <div>
-          {/* Summary panel */}
+          {/* Summary panel — anchor: section-summary */}
           {showSummary && (
-            <SummaryPanel
-              lectureId={selected.id}
-              summary={selected.summary!}
-              onTimestampClick={scrollToSegment}
-              collapsed={summaryCollapsed}
-              onToggleCollapse={() => setSummaryCollapsed((v) => !v)}
-            />
+            <div id="section-summary" style={{ scrollMarginTop: 50 }}>
+              <SummaryPanel
+                lectureId={selected.id}
+                summary={selected.summary!}
+                onTimestampClick={scrollToSegment}
+                collapsed={summaryCollapsed}
+                onToggleCollapse={() => setSummaryCollapsed((v) => !v)}
+              />
+            </div>
           )}
 
           {/* No summary banner */}
@@ -4077,13 +4182,15 @@ export default function App() {
             </div>
           )}
 
-          {/* Comprehensive Notes (정리) — standalone section. GPT 변형은 임시 중단, Claude 단독 */}
+          {/* Comprehensive Notes (강의 정리) — anchor: section-notes. Claude 단독 */}
           {selected.summary && (selected.summary.notes_claude || selected.summary.notes_gpt) && (
-            <NotesSection
-              lectureId={selected.id}
-              notesClaude={selected.summary.notes_claude ?? ''}
-              models={selected.summary.models}
-            />
+            <div id="section-notes" style={{ scrollMarginTop: 50 }}>
+              <NotesSection
+                lectureId={selected.id}
+                notesClaude={selected.summary.notes_claude ?? ''}
+                models={selected.summary.models}
+              />
+            </div>
           )}
 
           {/* Learning Notes (학습 노트) — standalone section */}
@@ -4095,8 +4202,8 @@ export default function App() {
             onRefresh={fetchInsights}
           />
 
-          {/* Transcript section header — divider + controls */}
-          <div className="shrink-0 px-5 py-2 bg-slate-50/80 border-y border-slate-200/80 flex items-center gap-2">
+          {/* Transcript section header — anchor: section-transcript */}
+          <div id="section-transcript" className="shrink-0 px-5 py-2 bg-slate-50/80 border-y border-slate-200/80 flex items-center gap-2" style={{ scrollMarginTop: 50 }}>
             <button
               onClick={() => setTranscriptCollapsed((v) => !v)}
               className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 hover:text-slate-700 mr-auto transition-colors"
@@ -4362,27 +4469,49 @@ export default function App() {
         {/* Content row — main viewer + 우측 chat panel */}
         <div className="flex-1 flex overflow-hidden relative" style={{ minHeight: 0 }}>
         <main className="flex-1 flex flex-col overflow-hidden relative">
-          {/* Content toolbar — title + domain badge + copy */}
+          {/* Meta bar — design D · Hybrid: 도메인 / 모델 라벨 / 강의 제목 / 카운트 + 액션 */}
           {selected && (
-            <div className="shrink-0 border-b border-slate-200/80 px-5 py-2.5 flex items-center gap-3 bg-white">
-              <h2 className="text-[14px] font-semibold text-slate-800 truncate min-w-0">
-                {selected.label}
-              </h2>
-
-              <LectureDomainBadge
-                lecture={selectedLecture}
-                domains={domains}
-                onConfirm={(domainId) =>
-                  handleDomainConfirm(selectedLecture!.id, domainId)
-                }
-              />
-
-              <div className="ml-auto flex items-center gap-2">
+            <div
+              className="shrink-0"
+              style={{
+                padding: '12px 24px 10px',
+                borderBottom: '1px solid var(--border)',
+                background: 'var(--surface)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-3)', marginBottom: 3, flexWrap: 'wrap' }}>
+                  <LectureDomainBadge
+                    lecture={selectedLecture}
+                    domains={domains}
+                    onConfirm={(domainId) =>
+                      handleDomainConfirm(selectedLecture!.id, domainId)
+                    }
+                  />
+                  {selected.summary?.models?.claude_summary && (
+                    <span className="mono" style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-4)' }}>
+                      · {selected.summary.models.claude_summary}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {selected.label}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+                <span className="ds-pill" title="북마크 개수" style={{ fontSize: 11 }}>
+                  <BookmarkIcon className="w-3 h-3" /> {bookmarks.length}
+                </span>
+                <span className="ds-pill" title="학습 노트 개수" style={{ fontSize: 11 }}>
+                  <LightBulbIcon className="w-3 h-3" /> {insights.length}
+                </span>
                 <button
                   onClick={copyTranscript}
-                  className={`p-1.5 rounded-md transition-colors ${
-                    copied ? 'text-teal-500 bg-teal-50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
-                  }`}
+                  className="ds-btn ghost sm"
+                  style={{ padding: '0 6px' }}
                   title={copied ? '복사됨!' : '클립보드에 복사'}
                 >
                   {copied ? <CheckIcon /> : <CopyIcon />}
@@ -4402,14 +4531,30 @@ export default function App() {
             </div>
           )}
 
+          {/* Sticky anchor TOC — design D · Hybrid */}
+          {selected && selected.summary && (
+            <AnchorToc scrollRef={contentRef} />
+          )}
+
           {/* Scrollable content */}
-          <div ref={contentRef} className="flex-1 overflow-y-auto bg-white scrollbar-thin">
+          <div ref={contentRef} className="flex-1 overflow-y-auto scrollbar-thin" style={{ background: 'var(--bg)' }}>
             {renderContent()}
           </div>
 
-          {/* Audio player */}
+          {/* Audio player — design D · Hybrid: 북마크 색상 마커 + 재생헤드 */}
           {selected && (
-            <div className="shrink-0 border-t border-slate-200/80 bg-slate-50 px-4 py-2 flex items-center gap-3">
+            <div
+              className="shrink-0"
+              style={{
+                height: 52,
+                borderTop: '1px solid var(--border)',
+                background: 'var(--surface)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '0 24px',
+              }}
+            >
               <audio
                 ref={audioRef}
                 src={audioSrc}
@@ -4426,7 +4571,18 @@ export default function App() {
                   if (!a) return
                   audioPlaying ? a.pause() : a.play().catch(() => {})
                 }}
-                className="shrink-0 w-8 h-8 rounded-full bg-teal-600 text-white hover:bg-teal-700 transition flex items-center justify-center"
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: 'var(--accent)',
+                  color: '#fff',
+                  border: 0,
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
                 title={audioPlaying ? '일시정지' : '재생'}
               >
                 {audioPlaying ? (
@@ -4435,26 +4591,116 @@ export default function App() {
                   <svg className="w-3.5 h-3.5 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                 )}
               </button>
-              <span className="text-[11px] font-mono text-slate-500 w-[72px] shrink-0">
-                {formatTime(audioTime)} / {formatTime(audioDuration)}
+              <span
+                className="mono"
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--text-3)',
+                  minWidth: 44,
+                  flexShrink: 0,
+                }}
+              >
+                {formatTime(audioTime)}
               </span>
-              <input
-                type="range"
-                min={0}
-                max={audioDuration || 1}
-                step={0.1}
-                value={audioTime}
-                onChange={(e) => {
-                  const t = Number(e.target.value)
+              {/* Marker-rich progress track */}
+              <div
+                style={{
+                  flex: 1,
+                  height: 18,
+                  position: 'relative',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+                onClick={(e) => {
+                  if (!audioDuration) return
+                  const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+                  const t = ratio * audioDuration
                   setAudioTime(t)
                   if (audioRef.current) audioRef.current.currentTime = t
                 }}
-                className="flex-1 h-1.5 accent-teal-600 cursor-pointer"
-              />
+              >
+                {/* track */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    right: 0,
+                    height: 4,
+                    background: 'var(--surface-3)',
+                    borderRadius: 2,
+                  }}
+                />
+                {/* progress */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    height: 4,
+                    width: audioDuration > 0 ? `${(audioTime / audioDuration) * 100}%` : '0%',
+                    background: 'var(--accent)',
+                    borderRadius: 2,
+                  }}
+                />
+                {/* bookmark markers */}
+                {audioDuration > 0 &&
+                  bookmarks.map((b) => {
+                    const sec = parseTimestamp(b.time)
+                    const pct = Math.max(0, Math.min(100, (sec / audioDuration) * 100))
+                    return (
+                      <div
+                        key={b.id}
+                        title={`${b.time}${b.note ? ' · ' + b.note : ''}`}
+                        style={{
+                          position: 'absolute',
+                          left: `${pct}%`,
+                          top: 'calc(50% - 7px)',
+                          width: 2,
+                          height: 14,
+                          background: b.color,
+                          transform: 'translateX(-1px)',
+                          pointerEvents: 'none',
+                        }}
+                      />
+                    )
+                  })}
+                {/* play head */}
+                {audioDuration > 0 && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: `${(audioTime / audioDuration) * 100}%`,
+                      top: 'calc(50% - 6px)',
+                      width: 12,
+                      height: 12,
+                      borderRadius: '50%',
+                      background: 'var(--accent)',
+                      boxShadow: '0 0 0 3px rgba(13, 148, 136, 0.2)',
+                      transform: 'translateX(-6px)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                )}
+              </div>
+              <span
+                className="mono"
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--text-3)',
+                  minWidth: 44,
+                  flexShrink: 0,
+                }}
+              >
+                {formatTime(audioDuration)}
+              </span>
               <select
-                value={1}
+                defaultValue={1}
                 onChange={(e) => { if (audioRef.current) audioRef.current.playbackRate = Number(e.target.value) }}
-                className="text-[11px] bg-white border border-slate-200 rounded px-1 py-0.5 text-slate-500"
+                className="ds-btn sm"
+                style={{ padding: '0 6px', appearance: 'none' }}
               >
                 <option value={0.75}>0.75x</option>
                 <option value={1}>1x</option>
