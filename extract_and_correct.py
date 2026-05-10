@@ -647,41 +647,39 @@ def _call_gpt_text(system_prompt: str, user_prompt: str, label: str,
     return ""
 
 
-_SHOW_ME_SYSTEM_PROMPT = r"""당신은 학술 강의를 시각적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 마크다운 텍스트와 직접 작성한 SVG 다이어그램을 혼합한 시각적 요약을 만드세요.
+_SHOW_ME_SYSTEM_PROMPT = r"""당신은 학술 강의를 시각적으로 정리하는 디자이너 겸 프론트엔드 엔지니어입니다.
+강의 녹취록을 읽고, 한 페이지짜리 HTML 단편(fragment) 을 작성하세요.
 
-## 출력 형식 규칙
+## 출력 형식
 
-1. 일반 텍스트는 마크다운 형식 (##, **, -, 등)
-2. 다이어그램은 반드시 ```svg 코드 블록으로 감쌈 (raw <svg> 태그를 직접 작성)
-3. 한국어로 작성하되, 영어 전문 용어는 원문 유지
-
-## SVG 작성 가이드
-
-- `<svg>` 에는 `viewBox` 와 `xmlns="http://www.w3.org/2000/svg"` 를 반드시 명시.
-  같은 응답 안의 모든 다이어그램은 동일한 viewBox 를 사용해 비율을 통일한다.
-- 색상 · 폰트 · 노드 모양 · 레이아웃 · 정보 밀도는 강의 내용과 어울리도록
-  자유롭게 선택. 다만 **하나의 응답에 들어가는 여러 SVG 사이에서는 색 팔레트
-  와 시각 톤을 일관되게 유지** (페이지 안에서 통일감이 깨지지 않게).
-- 좌표는 viewBox 영역 안에서만 사용. 텍스트가 노드를 벗어나거나 도형이
-  서로 겹치지 않도록 충분한 여유를 두고 검산할 것.
+- 응답 전체가 **단일 HTML 단편** 입니다. 마크다운 wrapper, 코드 펜스(```), 주석 설명 모두 금지.
+- `<html>`, `<head>`, `<body>` 같은 root 요소는 쓰지 마세요. 그 안에 들어갈 자식 요소들만 직접 작성하세요 (예: `<section>...</section><figure><svg>...</svg></figure>...`).
+- SVG 다이어그램은 인라인 `<svg>` 태그로 직접 포함. `viewBox` 와 `xmlns="http://www.w3.org/2000/svg"` 를 명시.
+- CSS 는 `<style>` 블록 또는 element 의 `style` 속성으로 작성. 외부 CSS 로드 금지.
+- 한국어로 작성하되, 영어 전문 용어는 원문 유지.
 
 ## 보안 — 절대 금지
 
 - `<script>` 태그
-- `onclick`/`onload` 등 모든 `on*` 이벤트 핸들러 속성
-- 외부 URL 참조 (`href`, `xlink:href`, `<image>` 등에서 외부 이미지/폰트 로드)
+- `onclick`, `onload` 등 모든 `on*` 이벤트 핸들러 속성
+- 외부 리소스 참조: `<img src="https://...">`, `<image href="...">`, 외부 폰트 URL, `xlink:href` 의 외부 URL 등 모든 네트워크 로드
 
-## 필수 포함 섹션
+## 콘텐츠
 
-### 1. 강의 개요 (1~2 문단 마크다운)
-강의의 핵심을 자기완결적으로 요약.
+페이지에는 최소한 다음 요소를 포함하세요:
 
-### 2. 강의 흐름도 (SVG)
-강의의 주제 전개나 논리 흐름을 시각화. 노드 수 · 형태 · 레이아웃은 자유.
+1. **강의 개요** — 강의 핵심을 자기완결적으로 요약하는 짧은 도입부.
+2. **강의 흐름도(SVG)** — 강의의 주제 전개나 논리 흐름을 시각화한 인라인 SVG.
+3. **핵심 개념 관계도(SVG)** — 주요 개념과 그 관계를 시각화. 흐름도와 다른 관점/구도로.
 
-### 3. 핵심 개념 관계도 (SVG)
-주요 개념과 그 관계를 시각화. 흐름도와는 다른 관점/구도로 표현하는 것을 권장.
+여기에 강의에 어울리는 추가 시각 요소(타임라인, 비교 표, 인용 카드, 콜아웃 등)를 자유롭게 더하세요.
+
+## 디자인 가이드
+
+- 색상 · 폰트 · 노드 모양 · 카드 / 그리드 / 박스 레이아웃 · 정보 밀도는 강의 분위기에 맞게 **자유롭게 결정**. 강의 주제와 어울리는 톤을 직접 선택해도 됩니다.
+- 단 **하나의 페이지 안에서는 시각 톤(팔레트, 폰트 시스템, 모서리 둥글기, 여백 리듬)을 일관되게** 유지하세요.
+- SVG 의 좌표/도형은 모두 `viewBox` 영역 안에 들어가도록 검산. 텍스트가 노드를 벗어나거나 도형이 서로 겹치지 않게 여유를 둘 것.
+- 가능하면 같은 페이지 안의 SVG 들은 같은 viewBox 비율을 사용해 보기 좋게.
 """
 
 
@@ -776,19 +774,21 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
     transcript_text = "\n".join(f"[{s['time']}] {s['text']}" for s in corrected_segments)
     valid_times = [s["time"] for s in corrected_segments]
 
-    print(f"  요약 생성: 8개 섹션 병렬 처리 | 모델: {LECTURE_GPT_MODEL} + {LECTURE_NOTES_MODEL}")
+    print(
+        f"  요약 생성: 6개 섹션 병렬 처리 | "
+        f"메타·Q&A: {LECTURE_GPT_MODEL} | ShowMe·Notes: {LECTURE_NOTES_MODEL}"
+    )
 
-    # 8개 섹션 병렬 생성
-    results = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    # ShowMe / Notes 의 GPT 변형은 임시 비활성화 — Opus(Claude) 단독 사용.
+    # GPT 의 SVG 생성 품질이 낮아 viewer 토글에서도 제거됨.
+    results: dict[str, object] = {"show_me_gpt": "", "notes_gpt": ""}
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(_generate_overview, transcript_text): "overview",
             executor.submit(_generate_key_concepts, transcript_text): "key_concepts",
             executor.submit(_generate_timeline, transcript_text): "timeline",
             executor.submit(_generate_study_guide, transcript_text): "study_guide",
-            executor.submit(_generate_show_me, transcript_text): "show_me_gpt",
             executor.submit(_generate_show_me_claude, transcript_text): "show_me_claude",
-            executor.submit(_generate_notes, transcript_text): "notes_gpt",
             executor.submit(_generate_notes_claude, transcript_text): "notes_claude",
         }
         for future in as_completed(futures):

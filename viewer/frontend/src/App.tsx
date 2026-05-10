@@ -426,8 +426,6 @@ declare global {
   }
 }
 
-type ShowMeModel = 'gpt' | 'claude'
-
 type ShowMeBlock =
   | { type: 'markdown'; content: string }
   | { type: 'mermaid'; code: string }
@@ -486,13 +484,28 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
   return blocks
 }
 
-// LLM이 생성한 SVG는 신뢰할 수 없으므로 <script>, on* 핸들러, javascript: URI를 제거한다
+// LLM 이 생성한 SVG/HTML 단편을 기본 sanitize: <script>, on* 핸들러, javascript: URI 제거
 function sanitizeSvg(raw: string): string {
   return raw
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<script[^>]*\/?\s*>/gi, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/\s+(?:xlink:href|href)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '')
+    .replace(/\s+(?:xlink:href|href|src)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '')
+}
+
+// LLM 응답이 HTML 단편 형태인지 판별. 옛 baseline (마크다운 + ```svg``` 코드 블록) 과 자동 분기.
+function isHtmlFragment(raw: string): boolean {
+  return /^\s*</.test(raw)
+}
+
+function HtmlFragment({ html }: { html: string }) {
+  const safe = useMemo(() => sanitizeSvg(html), [html])
+  return (
+    <div
+      className="lecture-html-fragment my-4 rounded-xl border border-slate-200 bg-white overflow-x-auto p-5"
+      dangerouslySetInnerHTML={{ __html: safe }}
+    />
+  )
 }
 
 function CsvTable({ data }: { data: string[][] }) {
@@ -1116,35 +1129,28 @@ function RegenButton({
 
 function ShowMe({
   lectureId,
-  showMeGpt,
   showMeClaude,
   models,
 }: {
   lectureId: string
-  showMeGpt: string
+  // GPT 변형은 임시 중단되어 props 에서 제거 — Claude (Opus) 단독.
   showMeClaude: string
   models?: LectureSummary['models']
 }) {
-  const hasGpt = showMeGpt.length > 0
-  const hasClaude = showMeClaude.length > 0
-
-  const defaultModel: ShowMeModel = hasClaude ? 'claude' : 'gpt'
-  const [model, setModel] = useState<ShowMeModel>(defaultModel)
-
-  const fallback = model === 'claude' ? showMeClaude : showMeGpt
-  const slot = useModuleVersions(lectureId, 'show_me', model, fallback)
+  const slot = useModuleVersions(lectureId, 'show_me', 'claude', showMeClaude)
 
   const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
-  const activeModelId =
-    currentMeta?.model_id ??
-    (model === 'claude' ? models?.claude_summary : models?.gpt_summary)
-  const blocks = useMemo(() => parseShowMeContent(slot.content), [slot.content])
-
-  const hasBothModels = hasGpt && hasClaude
+  const activeModelId = currentMeta?.model_id ?? models?.claude_summary
+  const isHtml = useMemo(() => isHtmlFragment(slot.content), [slot.content])
+  const blocks = useMemo(
+    () => (isHtml ? [] : parseShowMeContent(slot.content)),
+    [isHtml, slot.content],
+  )
+  const renderKey = `${slot.selectedVersion ?? 'fb'}`
 
   return (
     <div className="px-5 py-4">
-      {/* Header row with model toggle, version dropdown, regen button */}
+      {/* Header row with version dropdown + regen button */}
       <div className="flex items-center justify-between mb-3 gap-3">
         <div className="min-w-0">
           <h3 className="text-[15px] font-semibold text-slate-800">강의 시각화</h3>
@@ -1157,31 +1163,6 @@ function ShowMe({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {hasBothModels && (
-            <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-              <button
-                onClick={() => setModel('gpt')}
-                className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
-                  model === 'gpt'
-                    ? 'bg-white text-emerald-700 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                GPT
-              </button>
-              <button
-                onClick={() => setModel('claude')}
-                className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
-                  model === 'claude'
-                    ? 'bg-white text-violet-700 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                Opus
-              </button>
-            </div>
-          )}
-
           <VersionDropdown
             versions={slot.versions}
             selectedVersion={slot.selectedVersion}
@@ -1201,14 +1182,17 @@ function ShowMe({
         </div>
       )}
 
-      {/* Rendered blocks */}
       <div className={slot.isLoading ? 'opacity-60 transition-opacity' : ''}>
-        {blocks.map((block, i) => {
-          if (block.type === 'svg') return <SvgDiagram key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} code={block.code} />
-          if (block.type === 'mermaid') return <MermaidDiagram key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} code={block.code} />
-          if (block.type === 'csv') return <CsvTable key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} data={block.data} />
-          return <MarkdownContent key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} content={block.content} />
-        })}
+        {isHtml ? (
+          <HtmlFragment key={renderKey} html={slot.content} />
+        ) : (
+          blocks.map((block, i) => {
+            if (block.type === 'svg') return <SvgDiagram key={`${renderKey}-${i}`} code={block.code} />
+            if (block.type === 'mermaid') return <MermaidDiagram key={`${renderKey}-${i}`} code={block.code} />
+            if (block.type === 'csv') return <CsvTable key={`${renderKey}-${i}`} data={block.data} />
+            return <MarkdownContent key={`${renderKey}-${i}`} content={block.content} />
+          })
+        )}
       </div>
     </div>
   )
@@ -1351,7 +1335,6 @@ function SummaryPanel({
             {(summary.show_me_gpt || summary.show_me_claude) ? (
               <ShowMe
                 lectureId={lectureId}
-                showMeGpt={summary.show_me_gpt ?? ''}
                 showMeClaude={summary.show_me_claude ?? ''}
                 models={summary.models}
               />
@@ -1378,24 +1361,17 @@ function SummaryPanel({
 }
 
 function NotesSection({
-  lectureId, notesGpt, notesClaude, models,
+  lectureId, notesClaude, models,
 }: {
   lectureId: string
-  notesGpt: string
+  // GPT 변형은 임시 중단 — Claude (Opus) 단독.
   notesClaude: string
   models?: LectureSummary['models']
 }) {
-  const hasGpt = notesGpt.length > 0
-  const hasClaude = notesClaude.length > 0
-  const [model, setModel] = useState<'gpt' | 'claude'>(hasClaude ? 'claude' : 'gpt')
   const [expanded, setExpanded] = useState(false)
-
-  const fallback = model === 'claude' ? notesClaude : notesGpt
-  const slot = useModuleVersions(lectureId, 'notes', model, fallback)
+  const slot = useModuleVersions(lectureId, 'notes', 'claude', notesClaude)
   const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
-  const activeModelId =
-    currentMeta?.model_id ??
-    (model === 'claude' ? models?.claude_summary : models?.gpt_summary)
+  const activeModelId = currentMeta?.model_id ?? models?.claude_summary
 
   return (
     <div className="px-5 py-4">
@@ -1414,27 +1390,6 @@ function NotesSection({
 
         {expanded && (
           <div className="flex items-center gap-2 shrink-0">
-            {hasGpt && hasClaude && (
-              <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-                <button
-                  onClick={() => setModel('gpt')}
-                  className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
-                    model === 'gpt' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  GPT
-                </button>
-                <button
-                  onClick={() => setModel('claude')}
-                  className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
-                    model === 'claude' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  Opus
-                </button>
-              </div>
-            )}
-
             <VersionDropdown
               versions={slot.versions}
               selectedVersion={slot.selectedVersion}
@@ -3924,11 +3879,10 @@ export default function App() {
             </div>
           )}
 
-          {/* Comprehensive Notes (정리) — standalone section */}
-          {selected.summary && (selected.summary.notes_gpt || selected.summary.notes_claude) && (
+          {/* Comprehensive Notes (정리) — standalone section. GPT 변형은 임시 중단, Claude 단독 */}
+          {selected.summary && (selected.summary.notes_claude || selected.summary.notes_gpt) && (
             <NotesSection
               lectureId={selected.id}
-              notesGpt={selected.summary.notes_gpt ?? ''}
               notesClaude={selected.summary.notes_claude ?? ''}
               models={selected.summary.models}
             />

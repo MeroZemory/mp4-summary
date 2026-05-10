@@ -378,6 +378,14 @@ async def regenerate(lecture_id: str, body: RegenerateRequest,
     if body.module not in VALID_MODULES or body.model_kind not in VALID_MODEL_KINDS:
         raise HTTPException(status_code=400, detail="Invalid module or model_kind")
 
+    # GPT 변형은 임시 중단 — Opus(Claude) 단독 사용.
+    # SVG 생성 품질이 너무 낮아 토글과 함께 비활성화됨.
+    if body.model_kind == "gpt":
+        raise HTTPException(
+            status_code=410,
+            detail="GPT 재생성은 임시 중단되었습니다. Claude(Opus) 모델로만 재생성 가능합니다.",
+        )
+
     if body.model_id is not None:
         candidates = (
             GPT_MODEL_CANDIDATES if body.model_kind == "gpt" else CLAUDE_MODEL_CANDIDATES
