@@ -3555,15 +3555,21 @@ function TocChipIcon({ name }: { name: string }) {
 function AnchorToc({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement> }) {
   const [active, setActive] = useState<ReaderTocKey>('overview')
 
+  // sticky TOC bar 높이(36) + 약간의 여유 — anchor 가 TOC 바로 아래에 정렬되도록
+  const TOP_OFFSET = 44
+
   useEffect(() => {
     const root = scrollRef.current
     if (!root) return
     const onScroll = () => {
-      const y = root.scrollTop + 80
+      const rootRect = root.getBoundingClientRect()
+      const trigger = TOP_OFFSET + 16
       let current: ReaderTocKey = READER_TOC_ITEMS[0].k
       for (const t of READER_TOC_ITEMS) {
         const el = root.querySelector<HTMLElement>('#section-' + t.k)
-        if (el && el.offsetTop <= y) current = t.k
+        if (!el) continue
+        const top = el.getBoundingClientRect().top - rootRect.top
+        if (top <= trigger) current = t.k
       }
       setActive(current)
     }
@@ -3577,7 +3583,12 @@ function AnchorToc({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement> }
     if (!root) return
     const el = root.querySelector<HTMLElement>('#section-' + k)
     if (!el) return
-    root.scrollTo({ top: el.offsetTop - 12, behavior: 'smooth' })
+    // getBoundingClientRect 차이 + 현재 scrollTop 으로 정확한 위치 계산.
+    // offsetTop 은 nearest positioned ancestor 기준이라 중첩 컨테이너 (SummaryPanel) 안에서 어긋남.
+    const rootRect = root.getBoundingClientRect()
+    const elRect = el.getBoundingClientRect()
+    const target = elRect.top - rootRect.top + root.scrollTop - TOP_OFFSET
+    root.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
     setActive(k)
   }
 
