@@ -1332,8 +1332,9 @@ function SummaryPanel({
 
       {!collapsed && (
         <div>
-          {/* Overview or ShowMe */}
-          <div className="border-t border-slate-100">
+          {/* Overview / ShowMe — anchor: section-overview + section-showme (같은 영역) */}
+          <div id="section-overview" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100">
+            <div id="section-showme" />
             {(summary.show_me_gpt || summary.show_me_claude) ? (
               <ShowMe
                 lectureId={lectureId}
@@ -1345,14 +1346,18 @@ function SummaryPanel({
             )}
           </div>
 
-          {/* Two-column grid: Key Concepts + Timeline */}
+          {/* Two-column grid: Key Concepts (id=section-concepts) + Timeline (id=section-timeline) */}
           <div className="border-t border-slate-100 px-5 py-4 grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <KeyConceptsList concepts={summary.key_concepts} onTimestampClick={onTimestampClick} />
-            <TimelineList timeline={summary.timeline} onTimestampClick={onTimestampClick} />
+            <div id="section-concepts" style={{ scrollMarginTop: 50 }}>
+              <KeyConceptsList concepts={summary.key_concepts} onTimestampClick={onTimestampClick} />
+            </div>
+            <div id="section-timeline" style={{ scrollMarginTop: 50 }}>
+              <TimelineList timeline={summary.timeline} onTimestampClick={onTimestampClick} />
+            </div>
           </div>
 
-          {/* Study Guide */}
-          <div className="border-t border-slate-100 px-5 py-4">
+          {/* Study Guide — anchor: section-qa */}
+          <div id="section-qa" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
             <StudyGuide items={summary.study_guide} onTimestampClick={onTimestampClick} />
           </div>
 
@@ -3518,9 +3523,13 @@ function UploadPanel({
 // 스크롤 위치에 따라 활성 칩이 자동 변경.
 
 const READER_TOC_ITEMS = [
-  { k: 'summary', label: 'Summary', ico: 'sparkle' },
-  { k: 'notes', label: '강의 정리', ico: 'list' },
-  { k: 'transcript', label: '전사', ico: 'doc' },
+  { k: 'overview',   label: 'Overview',  ico: 'sparkle' },
+  { k: 'concepts',   label: '핵심 개념',  ico: 'tag' },
+  { k: 'timeline',   label: '타임라인',   ico: 'clock' },
+  { k: 'showme',     label: 'ShowMe',     ico: 'diagram' },
+  { k: 'qa',         label: 'Q&A',        ico: 'bulb' },
+  { k: 'notes',      label: '강의 정리',  ico: 'list' },
+  { k: 'transcript', label: '전사',       ico: 'doc' },
 ] as const
 
 type ReaderTocKey = typeof READER_TOC_ITEMS[number]['k']
@@ -3530,6 +3539,10 @@ function TocChipIcon({ name }: { name: string }) {
     sparkle: 'M12 3v6M12 15v6M3 12h6M15 12h6M5 5l4 4M15 15l4 4M5 19l4-4M15 9l4-4',
     list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
     doc: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6',
+    tag: 'M20 12 12 20l-9-9V3h8l9 9ZM7 7h.01',
+    clock: 'M12 6v6l4 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
+    diagram: 'M5 7h4v4H5zM15 7h4v4h-4zM10 17h4v4h-4zM7 11v4h10v-4',
+    bulb: 'M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2Z',
   }
   const d = ICONS[name] || ICONS.sparkle
   return (
@@ -3540,7 +3553,7 @@ function TocChipIcon({ name }: { name: string }) {
 }
 
 function AnchorToc({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement> }) {
-  const [active, setActive] = useState<ReaderTocKey>('summary')
+  const [active, setActive] = useState<ReaderTocKey>('overview')
 
   useEffect(() => {
     const root = scrollRef.current
@@ -3912,11 +3925,6 @@ export default function App() {
     [lectures, selectedId],
   )
 
-  const totalSegments = useMemo(
-    () => entries.reduce((s, e) => s + (e.corrected?.segmentCount ?? e.raw?.segmentCount ?? 0), 0),
-    [],
-  )
-
   const filteredEntries = useMemo(() => {
     const q = search.trim().toLowerCase()
     return q ? entries.filter((e) => e.label.toLowerCase().includes(q)) : entries
@@ -4161,17 +4169,16 @@ export default function App() {
 
       return (
         <div>
-          {/* Summary panel — anchor: section-summary */}
+          {/* Summary panel — inner sections 에 section-overview/showme/concepts/timeline/qa anchor.
+              collapsed 시 TOC 클릭하면 자동 expand. */}
           {showSummary && (
-            <div id="section-summary" style={{ scrollMarginTop: 50 }}>
-              <SummaryPanel
-                lectureId={selected.id}
-                summary={selected.summary!}
-                onTimestampClick={scrollToSegment}
-                collapsed={summaryCollapsed}
-                onToggleCollapse={() => setSummaryCollapsed((v) => !v)}
-              />
-            </div>
+            <SummaryPanel
+              lectureId={selected.id}
+              summary={selected.summary!}
+              onTimestampClick={scrollToSegment}
+              collapsed={summaryCollapsed}
+              onToggleCollapse={() => setSummaryCollapsed((v) => !v)}
+            />
           )}
 
           {/* No summary banner */}
@@ -4367,42 +4374,10 @@ export default function App() {
   // ─── Main render ────────────────────────────────────
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-[#f8f9fa]">
-      {/* Header */}
-      <header className="shrink-0 h-12 border-b border-slate-200/80 bg-white px-4 flex items-center justify-between z-30">
-        <div className="flex items-center gap-3">
-          <h1 className="text-[15px] font-bold text-slate-800 tracking-tight">강의 녹취록</h1>
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
-            <span className="bg-slate-100 rounded-full px-2 py-0.5">{entries.length}개 강의</span>
-            <span className="bg-slate-100 rounded-full px-2 py-0.5">
-              {totalSegments.toLocaleString()}개 세그먼트
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="hidden md:flex items-center gap-1.5 text-[11px] text-slate-400">
-            <kbd className="font-mono bg-slate-100 rounded px-1.5 py-0.5 text-[10px]">⌘K</kbd>
-            <span className="mr-2.5">검색</span>
-            <kbd className="font-mono bg-slate-100 rounded px-1.5 py-0.5 text-[10px]">↑↓</kbd>
-            <span>탐색</span>
-          </div>
-          {currentUser && (
-            <div className="flex items-center gap-2 text-[12px] text-slate-500">
-              <span className="hidden sm:inline">{currentUser.display_name || currentUser.email}</span>
-              <a
-                href="/api/auth/logout"
-                onClick={async (e) => { e.preventDefault(); await fetch('/api/auth/logout', { method: 'POST' }); window.location.href = '/login' }}
-                className="text-slate-400 hover:text-slate-600 transition-colors"
-                title="로그아웃"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
-                </svg>
-              </a>
-            </div>
-          )}
-        </div>
-      </header>
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: 'var(--bg)' }}>
+      {/* Top header 제거 — 디자인 D · Hybrid 의 사이드바 brand + 메인 메타바 가
+          역할을 분담. 로그아웃은 사이드바 user footer, 강의 제목·카운트는 메타바.
+          ⌘K 검색은 사이드바 검색 input 으로 통합 (별도 단축키는 후속 PR). */}
 
       <div className="flex-1 overflow-hidden relative">
         <HybridShell

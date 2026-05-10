@@ -29,10 +29,13 @@
 ### 1.3 메인 강의 viewer (D · Hybrid)
 
 - ✅ 상단 메타바 (도메인 breadcrumb + 모델 라벨 + 강의 제목 + 북마크/노트 카운트 pill + copy 액션)
-- ✅ Sticky AnchorTOC — 칩 스타일 (`Summary` / `강의 정리` / `전사` 3 항목, 활성 칩 highlight, 스크롤 위치 자동 추적)
+- ✅ Sticky AnchorTOC — 칩 스타일 **7항목** (`Overview` / `핵심 개념` / `타임라인` / `ShowMe` / `Q&A` / `강의 정리` / `전사`), 활성 칩 highlight, 스크롤 위치 자동 추적
+- ✅ SummaryPanel 내부 분해 — `section-overview` / `section-showme` / `section-concepts` / `section-timeline` / `section-qa` 5개 anchor target
+- ✅ NotesSection / Transcript 영역에 `section-notes` / `section-transcript` anchor
 - ✅ AudioBar 마커 풍부 디자인 (북마크 색상 마커 + 둥근 재생헤드 + 라이트 톤)
 - ✅ 강의 전환 즉시 스크롤 (smooth 제거)
 - ✅ 타임스탬프 클릭 시 audio seek + 재생 상태 보존
+- ✅ Top header 제거 — 사이드바 brand + 메인 메타바가 역할 분담. 로그아웃은 사이드바 user footer.
 
 ### 1.4 ShowMe / Notes (Claude 단독)
 
@@ -51,15 +54,15 @@
 
 ## 2. 부분 적용 / 디자인과 차이 있는 영역
 
-### 2.1 메인 reader 본문 — 인라인 분해 미완
+### 2.1 메인 reader 본문 — 7항목 anchor 분해 ✅ 완료
 
-디자인 `variant-hybrid.jsx` 의 reader article 은 7개 섹션 (`overview`, `concepts`, `timeline`, `showme`, `notes`, `qa`, `transcript`) 을 모두 한 페이지에 인라인하고 sticky TOC 가 7항목으로 jump 한다.
+디자인 `variant-hybrid.jsx` 의 reader article 7개 섹션을 모두 anchor 분리 적용 완료:
+- ✅ SummaryPanel 내부 5개 (`section-overview` / `section-showme` / `section-concepts` / `section-timeline` / `section-qa`)
+- ✅ NotesSection (`section-notes`) / Transcript (`section-transcript`)
+- ✅ AnchorTOC 7항목 (Overview / 핵심 개념 / 타임라인 / ShowMe / Q&A / 강의 정리 / 전사)
 
-운영 viewer 는 **3항목 TOC** (`section-summary` = SummaryPanel 통째 / `section-notes` = NotesSection / `section-transcript` = 전사) 로만 anchor 분리. SummaryPanel 내부의 ShowMe·Concepts·Timeline·Q&A 가 한 덩어리로 묶여 있어 정밀 jump 불가.
-
-**TODO**:
-- [ ] SummaryPanel 내부를 `section-overview`, `section-concepts`, `section-timeline`, `section-showme`, `section-qa` 로 분해 (props 또는 컴포넌트 분리).
-- [ ] AnchorTOC 항목을 디자인의 7개로 확장.
+**남은 폴리시**:
+- [ ] SummaryPanel collapsed 상태에서 TOC 클릭 시 자동 expand (현재는 collapsed 면 inner anchor 가 mount 안 돼서 jump 무효).
 
 ### 2.2 Reader article max-w 720
 
@@ -102,13 +105,15 @@
 **TODO**:
 - [ ] `/login` 페이지를 React SPA 또는 server-rendered HTML 로 디자인 적용. **다만 좌측 브랜드는 다크인데 사용자가 'SVG 라이트 톤' 가이드를 명시했으므로, 라이트 톤으로 바꾸는 것을 권장** (off-white 배경 + 서브틀 accent gradient).
 
-### 2.6 헤더 (top bar)
+### 2.6 헤더 (top bar) ✅ 완료
 
-운영 viewer 는 상단 12px 흰색 헤더 (`강의 녹취록` 타이틀 + ⌘K 안내 + 사용자 정보 + 로그아웃). 디자인은 별도 top bar 없음 — 사이드바 brand 가 그 역할.
+✅ 운영 top header 완전 제거 (`<header className="shrink-0 h-12">` block 삭제).
+- 강의 제목·도메인·모델·카운트 → 메인 메타바 (이미 적용)
+- 로그아웃 → 사이드바 user footer (이미 적용)
+- ⌘K 안내·통계 pill 은 폐기 (검색은 사이드바 input 으로 통합)
 
-**TODO**:
-- [ ] 운영 헤더 제거 또는 사이드바 brand + 메인 메타바로 정보 분산. ⌘K 검색은 사이드바 검색 또는 글로벌 단축키로.
-- [ ] 로그아웃은 사이드바 user footer 에 이미 있음.
+**남은 폴리시**:
+- [ ] ⌘K 글로벌 단축키 (현재는 사이드바 검색 input 만 — keyboard binding 필요).
 
 ---
 
@@ -130,12 +135,14 @@
 
 ---
 
-## 4. 다음 PR 우선순위 제안
+## 4. 다음 PR 우선순위 (남은 작업)
 
-1. **메인 reader 7항목 anchor 분해** — SummaryPanel 내부 분리 (Overview / Concepts / Timeline / ShowMe / Q&A) + AnchorTOC 7항목 확장.
-2. **ChatPane 디자인 적용** — `ChatPaneHybrid` 패턴 (Sonnet pill, accent 버블, 인용 pill, 토큰 카운터, closed floating bubble).
-3. **NavScreens 디자인 — Insights / Domains** (filter rail + 카드/상세 패턴).
-4. **로그인 페이지 디자인** (라이트 톤 브랜드 패널 + form).
-5. **Reader article max-w wrapper** (Summary/Notes 만 720, transcript 별도).
-6. **새 nav `home` (강의 라이브러리)** — 통계 + 이어서 보기 + 도메인 테이블.
-7. **헤더 정리** — 사이드바 + 메타바 통합.
+> 이전 1·7 항목은 완료. 우선순위 갱신:
+
+1. **ChatPane 디자인 적용** — `ChatPaneHybrid` 패턴 (Sonnet pill, accent 버블, 인용 pill, 토큰 카운터, closed floating bubble). 운영 `ChatPanel` 큰 수정.
+2. **NavScreens 디자인 — Insights / Domains** (filter rail + 카드/상세 패턴). 현재 `NavScreen` 은 단순 list placeholder.
+3. **로그인 페이지 디자인** (라이트 톤 브랜드 패널 + form). 좌측 brand 는 라이트 톤으로 변경 (다크 X).
+4. **Reader article max-w wrapper** (Summary/Notes 만 720, transcript 별도). 정보 밀도 vs 디자인 의도 균형.
+5. **새 nav `home` (강의 라이브러리)** — 통계 + 이어서 보기 + 도메인 테이블 (디자인 `ScreenHome`).
+6. **SummaryPanel 자동 expand** — TOC 클릭 시 collapsed 상태에서 자동 펼침.
+7. **⌘K 글로벌 단축키** — 사이드바 검색 input 으로 focus.
