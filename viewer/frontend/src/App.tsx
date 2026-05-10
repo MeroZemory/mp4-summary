@@ -28,6 +28,11 @@ type LectureSummary = {
   version: number
   generated_at: string
   video: string
+  models?: {
+    correction?: string
+    gpt_summary?: string
+    claude_summary?: string
+  }
   overview: {
     title: string
     summary: string
@@ -729,9 +734,11 @@ function DiagramModal({ svg, onClose }: { svg: string; onClose: () => void }) {
 function ShowMe({
   showMeGpt,
   showMeClaude,
+  models,
 }: {
   showMeGpt: string
   showMeClaude: string
+  models?: LectureSummary['models']
 }) {
   const hasGpt = showMeGpt.length > 0
   const hasClaude = showMeClaude.length > 0
@@ -740,6 +747,7 @@ function ShowMe({
   const [model, setModel] = useState<ShowMeModel>(defaultModel)
 
   const content = model === 'claude' ? showMeClaude : showMeGpt
+  const activeModel = model === 'claude' ? models?.claude_summary : models?.gpt_summary
   const blocks = useMemo(() => parseShowMeContent(content), [content])
 
   const hasBothModels = hasGpt && hasClaude
@@ -748,7 +756,10 @@ function ShowMe({
     <div className="px-5 py-4">
       {/* Header row with model toggle */}
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[15px] font-semibold text-slate-800">강의 시각화</h3>
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold text-slate-800">강의 시각화</h3>
+          {activeModel && <p className="mt-0.5 text-[11px] text-slate-400">{activeModel}</p>}
+        </div>
 
         {hasBothModels && (
           <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
@@ -760,7 +771,7 @@ function ShowMe({
                   : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              GPT-5.4
+              GPT
             </button>
             <button
               onClick={() => setModel('claude')}
@@ -770,7 +781,7 @@ function ShowMe({
                   : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              Claude Opus
+              Opus
             </button>
           </div>
         )}
@@ -924,6 +935,7 @@ function SummaryPanel({
               <ShowMe
                 showMeGpt={summary.show_me_gpt ?? ''}
                 showMeClaude={summary.show_me_claude ?? ''}
+                models={summary.models}
               />
             ) : (
               <OverviewCard overview={summary.overview} />
@@ -947,12 +959,13 @@ function SummaryPanel({
   )
 }
 
-function NotesSection({ notesGpt, notesClaude }: { notesGpt: string; notesClaude: string }) {
+function NotesSection({ notesGpt, notesClaude, models }: { notesGpt: string; notesClaude: string; models?: LectureSummary['models'] }) {
   const hasGpt = notesGpt.length > 0
   const hasClaude = notesClaude.length > 0
   const [model, setModel] = useState<'gpt' | 'claude'>(hasClaude ? 'claude' : 'gpt')
   const [expanded, setExpanded] = useState(false)
   const content = model === 'claude' ? notesClaude : notesGpt
+  const activeModel = model === 'claude' ? models?.claude_summary : models?.gpt_summary
 
   return (
     <div className="px-5 py-4">
@@ -961,6 +974,7 @@ function NotesSection({ notesGpt, notesClaude }: { notesGpt: string; notesClaude
           <ChevronDownIcon className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`} />
           <h3 className="text-[14px] font-semibold text-slate-800">강의 정리</h3>
           <span className="text-[11px] text-slate-400">강의를 대체할 수 있는 포괄적 노트</span>
+          {activeModel && <span className="text-[11px] text-slate-400">{activeModel}</span>}
         </button>
 
         {hasGpt && hasClaude && expanded && (
@@ -971,7 +985,7 @@ function NotesSection({ notesGpt, notesClaude }: { notesGpt: string; notesClaude
                 model === 'gpt' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              GPT-5.4
+              GPT
             </button>
             <button
               onClick={() => setModel('claude')}
@@ -979,7 +993,7 @@ function NotesSection({ notesGpt, notesClaude }: { notesGpt: string; notesClaude
                 model === 'claude' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              Claude Opus
+              Opus
             </button>
           </div>
         )}
@@ -3446,6 +3460,7 @@ export default function App() {
             <NotesSection
               notesGpt={selected.summary.notes_gpt ?? ''}
               notesClaude={selected.summary.notes_claude ?? ''}
+              models={selected.summary.models}
             />
           )}
 

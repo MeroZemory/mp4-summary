@@ -1,5 +1,5 @@
 """
-MP4 → STT(ElevenLabs/Whisper) → GPT-5.4 교정 파이프라인
+MP4 → STT(ElevenLabs/Whisper) → GPT 교정/요약 파이프라인
 
 ElevenLabs Scribe v2 (화자분리 지원) 또는 Whisper를 선택 가능.
 최대 20 워커 병렬 처리, 옵션 조합별 캐시 관리.
@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -51,7 +52,8 @@ MAX_WORKERS = int(_cfg("MAX_WORKERS", "20"))
 CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4-mini")
 ANTHROPIC_API_KEY = _cfg("ANTHROPIC_API_KEY")
 DOMAIN_DETECTION = _cfg("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
-LECTURE_NOTES_MODEL = _cfg("LECTURE_NOTES_MODEL", "claude-opus-4-7")  # 강의 노트 생성용 Anthropic 모델
+LECTURE_GPT_MODEL = _cfg("LECTURE_GPT_MODEL", "gpt-5.5")  # GPT 요약/정리 모델
+LECTURE_NOTES_MODEL = _cfg("LECTURE_NOTES_MODEL", "claude-opus-4-7")  # Claude 요약/정리 모델
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY를 찾을 수 없습니다. .env를 확인하세요.")
@@ -65,7 +67,12 @@ OUTPUT_DIR = SCRIPT_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DOWNLOADS_DIR = SCRIPT_DIR / "downloads"
-MP4_FILES = sorted(DOWNLOADS_DIR.glob("*.mp4")) if DOWNLOADS_DIR.exists() else []
+# MP4(영상) 또는 MP3(추출 단계 스킵) 둘 다 허용
+MEDIA_FILES: list[Path] = (
+    sorted([*DOWNLOADS_DIR.glob("*.mp4"), *DOWNLOADS_DIR.glob("*.mp3")])
+    if DOWNLOADS_DIR.exists()
+    else []
+)
 
 # ElevenLabs 파일 크기 제한
 ELEVENLABS_MAX_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
@@ -89,18 +96,42 @@ def cache_path_for(video_stem: str, stage: str) -> Path:
     return OUTPUT_DIR / f"{key}.json"
 
 
+def summary_cache_path_for(video_stem: str) -> Path:
+    """교정 모델과 요약 모델 조합을 모두 반영한 요약 캐시 경로."""
+    model_key = f"{CORRECTION_MODEL}_{LECTURE_GPT_MODEL}_{LECTURE_NOTES_MODEL}"
+    key = make_cache_key(video_stem, STT_PROVIDER, model_key, "summary")
+    return OUTPUT_DIR / f"{key}.json"
+
+
+def latest_cache_path_for(video_stem: str, stage: str) -> Path | None:
+    """모델 변경 전 생성된 캐시까지 포함해 가장 최근 stage 캐시를 찾는다."""
+    candidates = sorted(
+        OUTPUT_DIR.glob(f"{video_stem}_{stage}_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
 # ── 1단계: 오디오 추출 ────────────────────────────────────────────────────────
 
-def extract_audio(mp4_path: Path) -> Path:
-    """MP4에서 오디오를 MP3로 추출 (캐시됨)"""
-    audio_path = OUTPUT_DIR / f"{mp4_path.stem}.mp3"
+def extract_audio(media_path: Path) -> Path:
+    """MP4면 오디오를 MP3로 추출, MP3 입력이면 음성 추출 단계 건너뛰고 그대로 사용 (캐시됨)"""
+    audio_path = OUTPUT_DIR / f"{media_path.stem}.mp3"
     if audio_path.exists():
         print(f"  [캐시] 오디오: {audio_path.name}")
         return audio_path
 
-    print(f"  오디오 추출 중: {mp4_path.name}")
+    # MP3 입력은 추출 없이 출력 위치로 복사 (이미 같은 경로면 위 캐시 분기에서 종료됨)
+    if media_path.suffix.lower() == ".mp3":
+        shutil.copy2(media_path, audio_path)
+        size_mb = audio_path.stat().st_size / (1024 * 1024)
+        print(f"  MP3 입력 — 음성 추출 단계 건너뜀 ({size_mb:.1f}MB)")
+        return audio_path
+
+    print(f"  오디오 추출 중: {media_path.name}")
     subprocess.run(
-        ["ffmpeg", "-i", str(mp4_path),
+        ["ffmpeg", "-i", str(media_path),
          "-vn", "-acodec", "libmp3lame", "-ab", "64k",
          "-ar", "16000", "-ac", "1", "-y", str(audio_path)],
         capture_output=True, check=True,
@@ -293,6 +324,10 @@ def transcribe_audio_parallel(audio_path: Path, provider: str) -> list[dict]:
     if cp.exists():
         print(f"  [캐시] 트랜스크립트: {cp.name}")
         return json.loads(cp.read_text(encoding="utf-8"))
+    latest_cp = latest_cache_path_for(audio_path.stem, "raw_transcript")
+    if latest_cp:
+        print(f"  [캐시] 트랜스크립트: {latest_cp.name}")
+        return json.loads(latest_cp.read_text(encoding="utf-8"))
 
     all_segments = _do_transcribe(audio_path, provider)
 
@@ -495,7 +530,7 @@ def _call_gpt_json(system_prompt: str, user_prompt: str, label: str) -> dict:
     for attempt in range(3):
         try:
             response = openai_client.chat.completions.create(
-                model=CORRECTION_MODEL,
+                model=LECTURE_GPT_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -594,17 +629,21 @@ def _generate_notes_claude(transcript_text: str) -> str:
 
 def _call_gpt_text(system_prompt: str, user_prompt: str, label: str) -> str:
     """GPT 텍스트 모드 호출 + 재시도 (show_me 등 자유형식 출력용)"""
+    max_tokens = 24000 if label == "notes" else 8000
     for attempt in range(3):
         try:
             response = openai_client.chat.completions.create(
-                model=CORRECTION_MODEL,
+                model=LECTURE_GPT_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_completion_tokens=8000,
+                max_completion_tokens=max_tokens,
             )
-            return response.choices[0].message.content.strip()
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                raise ValueError("empty GPT response")
+            return content
         except openai.RateLimitError:
             wait = 60 * (attempt + 1)
             print(f"    [ShowMe] Rate limit ({label}) — {wait}초 대기")
@@ -669,7 +708,7 @@ graph LR
 
 
 def _generate_show_me_claude(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성 (Claude Opus 4.6)"""
+    """ShowMe 콘텐츠 생성 (Claude Opus 4.7)"""
     if not anthropic_client:
         print("    [ShowMe] Anthropic API 키 없음 — 건너뜀")
         return ""
@@ -781,7 +820,7 @@ relevant_time은 해당 내용이 다뤄진 시점의 타임스탬프입니다."
 
 def generate_lecture_summary(corrected_segments: list[dict], video_name: str) -> dict:
     """교정된 트랜스크립트로부터 강의 요약 생성 (4개 섹션 병렬)"""
-    cp = cache_path_for(video_name, "summary")
+    cp = summary_cache_path_for(video_name)
     if cp.exists():
         print(f"  [캐시] 요약: {cp.name}")
         return json.loads(cp.read_text(encoding="utf-8"))
@@ -794,7 +833,7 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
     transcript_text = "\n".join(f"[{s['time']}] {s['text']}" for s in corrected_segments)
     valid_times = [s["time"] for s in corrected_segments]
 
-    print(f"  요약 생성: 8개 섹션 병렬 처리 | 모델: {CORRECTION_MODEL} + {LECTURE_NOTES_MODEL}")
+    print(f"  요약 생성: 8개 섹션 병렬 처리 | 모델: {LECTURE_GPT_MODEL} + {LECTURE_NOTES_MODEL}")
 
     # 8개 섹션 병렬 생성
     results = {}
@@ -842,6 +881,11 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "video": video_name,
+        "models": {
+            "correction": CORRECTION_MODEL,
+            "gpt_summary": LECTURE_GPT_MODEL,
+            "claude_summary": LECTURE_NOTES_MODEL,
+        },
         "overview": results.get("overview", {"title": "", "summary": ""}),
         "key_concepts": results.get("key_concepts", []),
         "timeline": results.get("timeline", []),
@@ -860,17 +904,19 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
 # ── 메인 파이프라인 ───────────────────────────────────────────────────────────
 
 def process_single_video(
-    mp4_path: Path,
+    media_path: Path,
     stages: set[str] | None = None,
     forced_domain_id: str | None = None,
 ) -> dict:
-    """단일 비디오 처리. stages가 None이면 전체, 아니면 지정 단계만 실행.
+    """단일 영상/오디오 파일(MP4 또는 MP3)을 처리.
+    stages가 None이면 전체, 아니면 지정 단계만 실행.
     stages: {"audio", "stt", "correct", "summary"} 중 선택.
+    MP3 입력이면 audio 단계가 추출 없이 출력 위치로의 복사로 처리됨.
     forced_domain_id: 코렉션 단계에서 자동 감지를 건너뛰고 강제로 사용할 도메인 ID."""
     run_all = stages is None
-    video_name = mp4_path.stem
+    video_name = media_path.stem
     print(f"\n{'='*70}")
-    print(f"처리 시작: {mp4_path.name}")
+    print(f"처리 시작: {media_path.name}")
     stage_names = "전체" if run_all else ", ".join(sorted(stages))
     print(f"  STT: {STT_PROVIDER} | 교정: {CORRECTION_MODEL} | 단계: {stage_names}")
     if forced_domain_id:
@@ -883,10 +929,10 @@ def process_single_video(
     summary = {}
     detected_match: DomainMatch | None = None
 
-    # 1. 오디오 추출
+    # 1. 오디오 추출 (MP3 입력이면 추출 없이 복사로 처리)
     if run_all or "audio" in stages:
         print("\n[오디오] 추출")
-        extract_audio(mp4_path)
+        extract_audio(media_path)
 
     # 2. STT 트랜스크립션
     if run_all or "stt" in stages:
@@ -918,6 +964,11 @@ def process_single_video(
             cp = cache_path_for(video_name, "raw_transcript")
             if cp.exists():
                 raw_segments = json.loads(cp.read_text(encoding="utf-8"))
+            else:
+                latest_cp = latest_cache_path_for(video_name, "raw_transcript")
+                if latest_cp:
+                    print(f"  [캐시] 원본 STT: {latest_cp.name}")
+                    raw_segments = json.loads(latest_cp.read_text(encoding="utf-8"))
         if raw_segments:
             # 도메인 결정: forced > 사전 감지 결과 > DOMAIN_DETECTION 정책
             if forced_domain_id:
@@ -969,7 +1020,7 @@ def process_single_video(
     print(f"\n완료: {video_name} ({elapsed/60:.1f}분 소요)")
 
     return {
-        "video": mp4_path.name,
+        "video": media_path.name,
         "raw_segments": raw_segments,
         "corrected_segments": corrected_segments,
         "summary": summary,
@@ -1018,24 +1069,25 @@ def main():
         print(f"  실행 단계: {', '.join(sorted(stages))}")
     print("=" * 70)
 
-    valid_files = [f for f in MP4_FILES if f.exists()]
+    valid_files = [f for f in MEDIA_FILES if f.exists()]
     if not valid_files:
-        print("처리할 MP4 파일이 없습니다.")
+        print("처리할 MP4/MP3 파일이 없습니다. (downloads/ 디렉토리 확인)")
         sys.exit(1)
 
     print(f"\n처리 대상: {len(valid_files)}개 파일")
     for f in valid_files:
         size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"  - {f.name} ({size_mb:.0f}MB)")
+        kind = "MP3" if f.suffix.lower() == ".mp3" else "MP4"
+        print(f"  - [{kind}] {f.name} ({size_mb:.0f}MB)")
 
     parallel = args.parallel
     if parallel > 1:
-        print(f"\n병렬 처리: {parallel}개 영상 동시 진행")
+        print(f"\n병렬 처리: {parallel}개 파일 동시 진행")
         results_map = {}
         with ThreadPoolExecutor(max_workers=parallel) as executor:
             futures = {
-                executor.submit(process_single_video, mp4, stages): i
-                for i, mp4 in enumerate(valid_files)
+                executor.submit(process_single_video, media, stages): i
+                for i, media in enumerate(valid_files)
             }
             for future in as_completed(futures):
                 idx = futures[future]
@@ -1051,8 +1103,8 @@ def main():
         results = [results_map[i] for i in range(len(valid_files))]
     else:
         results = []
-        for mp4_path in valid_files:
-            result = process_single_video(mp4_path, stages)
+        for media_path in valid_files:
+            result = process_single_video(media_path, stages)
             results.append(result)
 
     # 통합 결과 JSON
