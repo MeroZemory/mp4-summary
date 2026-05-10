@@ -1217,7 +1217,7 @@ function ShowMe({
       {/* Header row with version dropdown + regen button */}
       <div className="flex items-center justify-between mb-3 gap-3">
         <div className="min-w-0">
-          <h3 className="text-[15px] font-semibold text-slate-800">강의 시각화</h3>
+          <h3 className="text-[15px] font-semibold text-slate-800">시각화</h3>
           {activeModelId && (
             <p className="mt-0.5 text-[11px] text-slate-400">
               {activeModelId}
@@ -3595,13 +3595,13 @@ function UploadPanel({
 // 스크롤 위치에 따라 활성 칩이 자동 변경.
 
 const READER_TOC_ITEMS = [
-  { k: 'overview',   label: 'Overview',  ico: 'sparkle' },
+  { k: 'overview',   label: '개요',       ico: 'sparkle' },
   { k: 'concepts',   label: '핵심 개념',  ico: 'tag' },
   { k: 'timeline',   label: '타임라인',   ico: 'clock' },
-  { k: 'showme',     label: 'ShowMe',     ico: 'diagram' },
+  { k: 'showme',     label: '시각화',     ico: 'diagram' },
   { k: 'qa',         label: 'Q&A',        ico: 'bulb' },
   { k: 'notes',      label: '강의 정리',  ico: 'list' },
-  { k: 'transcript', label: '전사',       ico: 'doc' },
+  { k: 'transcript', label: '녹취록',     ico: 'doc' },
 ] as const
 
 type ReaderTocKey = typeof READER_TOC_ITEMS[number]['k']

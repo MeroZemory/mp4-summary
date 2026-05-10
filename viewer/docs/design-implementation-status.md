@@ -29,7 +29,7 @@
 ### 1.3 메인 강의 viewer (D · Hybrid)
 
 - ✅ 상단 메타바 (도메인 breadcrumb + 모델 라벨 + 강의 제목 + 북마크/노트 카운트 pill + copy 액션)
-- ✅ Sticky AnchorTOC — 칩 스타일 **7항목** (`Overview` / `핵심 개념` / `타임라인` / `ShowMe` / `Q&A` / `강의 정리` / `전사`), 활성 칩 highlight, 스크롤 위치 자동 추적
+- ✅ Sticky AnchorTOC — 칩 스타일 **7항목** (`개요` / `핵심 개념` / `타임라인` / `시각화` / `Q&A` / `강의 정리` / `녹취록`), 활성 칩 highlight, 스크롤 위치 자동 추적
 - ✅ SummaryPanel 내부 분해 — `section-overview` / `section-showme` / `section-concepts` / `section-timeline` / `section-qa` 5개 anchor target
 - ✅ NotesSection / Transcript 영역에 `section-notes` / `section-transcript` anchor
 - ✅ AudioBar 마커 풍부 디자인 (북마크 색상 마커 + 둥근 재생헤드 + 라이트 톤)
@@ -59,14 +59,14 @@
 디자인 `variant-hybrid.jsx` 의 reader article 7개 섹션을 모두 anchor 분리 적용 완료:
 - ✅ SummaryPanel 내부 5개 (`section-overview` / `section-showme` / `section-concepts` / `section-timeline` / `section-qa`)
 - ✅ NotesSection (`section-notes`) / Transcript (`section-transcript`)
-- ✅ AnchorTOC 7항목 (Overview / 핵심 개념 / 타임라인 / ShowMe / Q&A / 강의 정리 / 전사)
+- ✅ AnchorTOC 7항목 (개요 / 핵심 개념 / 타임라인 / 시각화 / Q&A / 강의 정리 / 녹취록)
 
 **남은 폴리시**:
 - [ ] SummaryPanel collapsed 상태에서 TOC 클릭 시 자동 expand (현재는 collapsed 면 inner anchor 가 mount 안 돼서 jump 무효).
 
 ### 2.2 Reader article max-w 720
 
-디자인은 `<article style="max-width: 720; margin: 0 auto; padding: 32px 32px 96px">` 로 reader 본문 폭을 제한. 운영 viewer 는 미적용 (전사가 너무 좁아지는 문제 우려).
+디자인은 `<article style="max-width: 720; margin: 0 auto; padding: 32px 32px 96px">` 로 reader 본문 폭을 제한. 운영 viewer 는 미적용 (녹취록이 너무 좁아지는 문제 우려).
 
 **TODO**:
 - [ ] Summary / Notes / Q&A 섹션은 max-w 720 reader article wrapper, transcript 는 더 넓게 (max-w 1100) 분리 적용.
