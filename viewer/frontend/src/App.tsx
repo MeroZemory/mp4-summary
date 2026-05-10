@@ -3,7 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { DomainPicker } from './components/DomainPicker'
-import { HybridShell } from './components/HybridShell'
+import { HybridShell, type ShellNavKey } from './components/HybridShell'
 import {
   groupLecturesByDomain,
   postLectureDomain,
@@ -3512,6 +3512,224 @@ function UploadPanel({
 
 // ─── App ────────────────────────────────────────────────
 
+// ─── Nav placeholder 화면 (강의 / 학습 노트 / 북마크 / 도메인) ──────
+//
+// 메인 viewer 의 D · Hybrid reader 재구성은 다음 PR. 그 전까지 4개 nav
+// 가 헷갈리지 않도록 lectures 외에는 운영 데이터 기반 간단 화면을 노출.
+
+interface NavScreenProps {
+  navKey: ShellNavKey
+  insights: QaInsight[]
+  bookmarks: Bookmark[]
+  domains: DomainInfo[]
+  pendingCount: number
+  onOpenBatchReview: () => void
+  onDeleteInsight: (id: string) => void
+  onDeleteBookmark: (id: string) => void
+  onSelectLecture: (lectureId: string) => void
+  onBack: () => void
+}
+
+function NavScreen({
+  navKey,
+  insights,
+  bookmarks,
+  domains,
+  pendingCount,
+  onOpenBatchReview,
+  onDeleteInsight,
+  onDeleteBookmark,
+  onSelectLecture,
+  onBack,
+}: NavScreenProps) {
+  const title =
+    navKey === 'insights' ? '학습 노트' :
+    navKey === 'bookmarks' ? '북마크' :
+    navKey === 'domains' ? '도메인' : ''
+
+  return (
+    <div className="flex-1 overflow-y-auto" style={{ background: 'var(--bg)' }}>
+      <div style={{ maxWidth: 960, margin: '0 auto', padding: '32px 32px 80px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+          <button
+            onClick={onBack}
+            className="ds-btn ghost sm"
+            title="강의 화면으로 돌아가기"
+          >
+            ← 강의로
+          </button>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: '-0.01em', color: 'var(--text-1)' }}>
+            {title}
+          </h1>
+        </div>
+
+        {navKey === 'insights' && (
+          <NavInsights
+            insights={insights}
+            pendingCount={pendingCount}
+            onOpenBatchReview={onOpenBatchReview}
+            onDelete={onDeleteInsight}
+            onSelectLecture={onSelectLecture}
+          />
+        )}
+        {navKey === 'bookmarks' && (
+          <NavBookmarks
+            bookmarks={bookmarks}
+            onDelete={onDeleteBookmark}
+            onSelectLecture={onSelectLecture}
+          />
+        )}
+        {navKey === 'domains' && <NavDomains domains={domains} />}
+      </div>
+    </div>
+  )
+}
+
+function NavInsights({
+  insights,
+  pendingCount,
+  onOpenBatchReview,
+  onDelete,
+  onSelectLecture,
+}: {
+  insights: QaInsight[]
+  pendingCount: number
+  onOpenBatchReview: () => void
+  onDelete: (id: string) => void
+  onSelectLecture: (lectureId: string) => void
+}) {
+  return (
+    <div className="ds-card" style={{ padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-3)' }}>
+          전체 <strong style={{ color: 'var(--text-1)' }}>{insights.length}</strong>개 ·
+          승인 대기 <strong style={{ color: 'var(--amber)' }}>{pendingCount}</strong>개
+        </p>
+        {pendingCount > 0 && (
+          <button onClick={onOpenBatchReview} className="ds-btn primary sm">일괄 검토 시작</button>
+        )}
+      </div>
+      {insights.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-4)' }}>아직 학습 노트가 없습니다.</p>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 10 }}>
+          {insights.slice(0, 50).map((it) => (
+            <li key={it.id} style={{ padding: '12px 14px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--surface)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                {it.action && (
+                  <span className={`ds-pill ${it.action === 'merge' ? '' : 'amber'}`} style={{ fontSize: 10 }}>
+                    {it.action}
+                  </span>
+                )}
+                {it.lecture_id && (
+                  <button onClick={() => onSelectLecture(it.lecture_id!)} className="ds-btn ghost sm" style={{ height: 22, padding: '0 6px' }}>
+                    {it.lecture_id}
+                  </button>
+                )}
+                <span style={{ marginLeft: 'auto' }}>
+                  <button onClick={() => onDelete(it.id)} className="ds-btn ghost sm" style={{ height: 22, padding: '0 6px' }}>삭제</button>
+                </span>
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', marginBottom: 4 }}>{it.question}</div>
+              <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.7 }}>{it.answer_summary}</div>
+              {it.tags.length > 0 && (
+                <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                  {it.tags.map((t) => (
+                    <span key={t} className="ds-pill" style={{ fontSize: 10 }}>{t}</span>
+                  ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function NavBookmarks({
+  bookmarks,
+  onDelete,
+  onSelectLecture,
+}: {
+  bookmarks: Bookmark[]
+  onDelete: (id: string) => void
+  onSelectLecture: (lectureId: string) => void
+}) {
+  // 강의별 그룹화
+  const byLecture = new Map<string, Bookmark[]>()
+  for (const b of bookmarks) {
+    const k = b.lecture_id || '__no_lecture__'
+    if (!byLecture.has(k)) byLecture.set(k, [])
+    byLecture.get(k)!.push(b)
+  }
+  const groups = Array.from(byLecture.entries())
+
+  if (groups.length === 0) {
+    return (
+      <div className="ds-card" style={{ padding: 20 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-4)' }}>아직 북마크가 없습니다.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      {groups.map(([lectureId, items]) => (
+        <div key={lectureId} className="ds-card" style={{ padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <button onClick={() => onSelectLecture(lectureId)} className="ds-btn ghost sm">
+              <span style={{ fontWeight: 600 }}>{lectureId}</span>
+              <span style={{ color: 'var(--text-4)', marginLeft: 6 }}>{items.length}개</span>
+            </button>
+          </div>
+          <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 8 }}>
+            {items.map((b) => (
+              <li key={b.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--surface-2)' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: b.color, marginTop: 4, flexShrink: 0 }} />
+                <span className="ds-pill-ts">{b.time}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {b.note ? (
+                    <div style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500 }}>{b.note}</div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'var(--text-4)', fontStyle: 'italic' }}>(메모 없음)</div>
+                  )}
+                </div>
+                <button onClick={() => onDelete(b.id)} className="ds-btn ghost sm" style={{ height: 22, padding: '0 6px', flexShrink: 0 }}>삭제</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function NavDomains({ domains }: { domains: DomainInfo[] }) {
+  if (domains.length === 0) {
+    return (
+      <div className="ds-card" style={{ padding: 20 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-4)' }}>등록된 도메인이 없습니다.</p>
+      </div>
+    )
+  }
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+      {domains.map((d) => (
+        <div key={d.id} className="ds-card" style={{ padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-1)' }}>{d.name}</span>
+            <span className="ds-pill" style={{ fontSize: 10 }}>{d.id}</span>
+          </div>
+          {d.description && (
+            <p style={{ margin: 0, fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7 }}>{d.description}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function App() {
   const [selectedId, setSelectedId] = useState(() => {
     const hash = decodeURIComponent(window.location.hash.slice(1))
@@ -3521,6 +3739,7 @@ export default function App() {
   const [contentSearch, setContentSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('corrected')
   const [copied, setCopied] = useState(false)
+  const [activeNav, setActiveNav] = useState<ShellNavKey>('lectures')
   const [summaryCollapsed, setSummaryCollapsed] = useState(false)
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true)
   const [chatOpen, setChatOpen] = useState(false)
@@ -3638,7 +3857,8 @@ export default function App() {
 
   // Reset on entry change
   useEffect(() => {
-    contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+    // 강의 전환 시 즉시 상단으로 — smooth 는 긴 스크롤일 때 시간이 너무 걸림
+    contentRef.current?.scrollTo({ top: 0 })
     setContentSearch('')
     setViewMode('corrected')
     setSummaryCollapsed(false)
@@ -3754,6 +3974,13 @@ export default function App() {
     audio.play().catch(() => {})
   }, [])
 
+  // 타임스탬프 클릭용 — 시점만 옮기고 재생 상태(play / pause) 는 그대로 유지
+  const seekAudioAt = useCallback((seconds: number) => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.currentTime = seconds
+  }, [])
+
   const copyTranscript = useCallback(() => {
     if (!activeFile?.isSegments) {
       if (activeFile) navigator.clipboard.writeText(JSON.stringify(activeFile.data, null, 2))
@@ -3807,9 +4034,9 @@ export default function App() {
       }, 1500)
     }
 
-    // Play audio from this timestamp
-    playAudioAt(targetSeconds)
-  }, [playAudioAt])
+    // 타임스탬프 클릭은 시점만 이동하고 재생 상태는 보존 (재생 중이면 그대로 재생, 일시정지면 일시정지 유지)
+    seekAudioAt(targetSeconds)
+  }, [seekAudioAt])
 
   // ─── Content rendering ──────────────────────────────
 
@@ -4072,7 +4299,8 @@ export default function App() {
 
       <div className="flex-1 overflow-hidden relative">
         <HybridShell
-          activeNav="lectures"
+          activeNav={activeNav}
+          onNavSelect={setActiveNav}
           activeLectureId={selected?.id ?? null}
           lectures={lectures}
           domains={domains}
@@ -4114,6 +4342,23 @@ export default function App() {
             </>
           }
         >
+        {/* Nav 분기 — 'lectures' 외 nav 는 별도 placeholder 화면.
+            메인 강의 viewer 의 D · Hybrid 재구성은 다음 PR. 여기는 기존 동작 보존. */}
+        {activeNav !== 'lectures' ? (
+          <NavScreen
+            navKey={activeNav}
+            insights={insights}
+            bookmarks={bookmarks}
+            domains={domains}
+            pendingCount={pendingCount}
+            onOpenBatchReview={() => setBatchReviewOpen(true)}
+            onDeleteInsight={handleInsightDelete}
+            onDeleteBookmark={handleBookmarkDelete}
+            onSelectLecture={(id) => { setSelectedId(id); setActiveNav('lectures') }}
+            onBack={() => setActiveNav('lectures')}
+          />
+        ) : (
+        <>
         {/* Content row — main viewer + 우측 chat panel */}
         <div className="flex-1 flex overflow-hidden relative" style={{ minHeight: 0 }}>
         <main className="flex-1 flex flex-col overflow-hidden relative">
@@ -4245,6 +4490,8 @@ export default function App() {
           </>
         )}
         </div>
+        </>
+        )}
         </HybridShell>
       </div>
 

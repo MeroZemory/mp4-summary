@@ -120,6 +120,29 @@ export function HybridShell({
     }
   }, [collapsed])
 
+  // 도메인 그룹별 fold 상태 (key 단위) — localStorage 영속화
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('hybridShell.collapsedGroups')
+      return stored ? new Set<string>(JSON.parse(stored)) : new Set<string>()
+    } catch {
+      return new Set<string>()
+    }
+  })
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      try {
+        localStorage.setItem('hybridShell.collapsedGroups', JSON.stringify(Array.from(next)))
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }
+
   // Search filter (sidebar 내부 강의 트리)
   const q = search.trim().toLowerCase()
   const filteredLectures = useMemo(
@@ -239,21 +262,37 @@ export function HybridShell({
           {/* Lecture tree (lectures nav 활성일 때) */}
           {!collapsed && activeNav === 'lectures' && (
             <div style={{ marginTop: 6 }}>
-              {groups.map((g) => (
+              {groups.map((g) => {
+                const groupCollapsed = collapsedGroups.has(g.key)
+                return (
                 <div key={g.key}>
-                  <div
+                  <button
+                    onClick={() => toggleGroup(g.key)}
                     style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      width: '100%',
                       padding: '12px 8px 4px',
                       fontSize: 10,
                       color: 'var(--text-4)',
                       textTransform: 'uppercase',
                       letterSpacing: '0.05em',
                       fontWeight: 600,
+                      background: 'transparent',
+                      border: 0,
+                      cursor: 'pointer',
+                      textAlign: 'left',
                     }}
+                    title={groupCollapsed ? '펼치기' : '접기'}
                   >
-                    {g.label}
-                  </div>
-                  {g.lectures.map((l) => {
+                    <ShellIcon name={groupCollapsed ? 'chev_r' : 'chev_l'} size={10} />
+                    <span style={{ flex: 1 }}>{g.label}</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-4)' }}>
+                      {g.lectures.length}
+                    </span>
+                  </button>
+                  {!groupCollapsed && g.lectures.map((l) => {
                     const active = l.id === activeLectureId
                     return (
                       <button
@@ -301,7 +340,8 @@ export function HybridShell({
                     )
                   })}
                 </div>
-              ))}
+                )
+              })}
               {groups.length === 0 && (
                 <div style={{ padding: '12px 10px', fontSize: 12, color: 'var(--text-4)' }}>
                   {q ? '검색 결과 없음' : '아직 강의가 없습니다'}
