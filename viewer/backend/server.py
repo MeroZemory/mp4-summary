@@ -24,6 +24,7 @@ from domains import router as domains_router
 from jobs import create_worker_manager, router as jobs_router
 from lecture_data import load_lecture_data
 from lectures import router as lectures_router
+from module_versions import router as module_versions_router
 from qa_extraction import router as insights_router
 
 # ── Paths ──
@@ -70,6 +71,7 @@ app.include_router(domains_router)
 app.include_router(insights_router)
 app.include_router(jobs_router)
 app.include_router(lectures_router)
+app.include_router(module_versions_router)
 
 
 # ── Login / Register pages (server-rendered HTML) ──

@@ -373,6 +373,26 @@ class WorkerManager:
             return
 
         try:
+            # regen — 파이프라인을 거치지 않고 단일 모듈/모델로 바로 LLM 호출
+            if job_type == "regen":
+                from module_versions import execute_regen  # type: ignore
+                module = job["regen_module"]
+                model_kind = job["regen_model_kind"]
+                model_id = job["regen_model_id"]
+                if not (module and model_kind and model_id):
+                    raise RuntimeError("regen job missing regen_module/model_kind/model_id")
+                new_version = await execute_regen(
+                    job_id, lecture_id, user_id, module, model_kind, model_id,
+                )
+                refresh_lecture(lecture_id)
+                await self._mark_completed(job_id, started)
+                print(
+                    f"[{worker_id}] 완료 (regen): {lecture_id} "
+                    f"{module}/{model_kind} → v{new_version}"
+                    f" ({(time.time()-started):.1f}s)"
+                )
+                return
+
             # 코렉션 단계는 lectures.domain_id 가 필요
             forced_domain_id: str | None = None
             if job_type == "correct":

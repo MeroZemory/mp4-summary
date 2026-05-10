@@ -563,9 +563,7 @@ JSON 형식으로 응답하세요: {"title": "강의 제목 (20자 이내)", "su
     return {"title": result.get("title", ""), "summary": result.get("summary", "")}
 
 
-def _generate_notes(transcript_text: str) -> str:
-    """강의 정리 — 강의를 안 봐도 핵심 전체를 이해할 수 있는 포괄적 노트"""
-    system = r"""당신은 대학 강의를 체계적으로 정리하는 전문가입니다.
+_NOTES_SYSTEM_PROMPT = r"""당신은 대학 강의를 체계적으로 정리하는 전문가입니다.
 강의 녹취록을 읽고, 강의를 직접 듣지 않더라도 모든 핵심 내용을 이해할 수 있는 포괄적인 강의 노트를 작성하세요.
 
 ## 핵심 원칙
@@ -581,39 +579,27 @@ def _generate_notes(transcript_text: str) -> str:
 - 수식, 수치, 구체적 예시가 있으면 반드시 포함
 - 분량 제한 없음 — 내용이 많으면 길게 작성"""
 
+
+def _generate_notes(transcript_text: str, model_id: str | None = None) -> str:
+    """강의 정리 — GPT 버전. model_id None이면 LECTURE_GPT_MODEL."""
     user = f"다음 강의 녹취록을 읽고 포괄적인 강의 노트를 작성하세요:\n\n{transcript_text}"
-    return _call_gpt_text(system, user, "notes")
+    return _call_gpt_text(_NOTES_SYSTEM_PROMPT, user, "notes", model_id=model_id)
 
 
-def _generate_notes_claude(transcript_text: str) -> str:
-    """강의 정리 — Claude Opus 버전"""
+def _generate_notes_claude(transcript_text: str, model_id: str | None = None) -> str:
+    """강의 정리 — Claude 버전. model_id None이면 LECTURE_NOTES_MODEL."""
     if not anthropic_client:
         return ""
 
-    system = r"""당신은 대학 강의를 체계적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 강의를 직접 듣지 않더라도 모든 핵심 내용을 이해할 수 있는 포괄적인 강의 노트를 작성하세요.
-
-## 핵심 원칙
-1. **누락 없음**: 강의에서 언급된 모든 핵심 개념, 방법론, 연구 결과, 데이터셋, 모델을 빠짐없이 포함
-2. **자기완결적**: 이 노트만 읽으면 강의 전체 내용을 이해할 수 있어야 함
-3. **구조 최적화**: 강의 흐름이 논리적이면 유지하되, 더 나은 이해를 위해 재구성해도 됨
-4. **깊이 유지**: 피상적 요약이 아닌, 개념의 원리·배경·적용까지 설명
-
-## 형식
-- 마크다운 사용 (##, ###, -, **bold**, `code` 등)
-- 한국어로 작성, 영어 전문 용어는 원문 유지
-- 관련 타임스탬프를 [HH:MM:SS] 형식으로 인용 (해당 내용이 강의에서 다뤄진 시점)
-- 수식, 수치, 구체적 예시가 있으면 반드시 포함
-- 분량 제한 없음 — 내용이 많으면 길게 작성"""
-
+    use_model = model_id or LECTURE_NOTES_MODEL
     user = f"다음 강의 녹취록을 읽고 포괄적인 강의 노트를 작성하세요:\n\n{transcript_text}"
 
     for attempt in range(3):
         try:
             response = anthropic_client.messages.create(
-                model=LECTURE_NOTES_MODEL,
+                model=use_model,
                 max_tokens=16000,
-                system=system,
+                system=_NOTES_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user}],
             )
             return response.content[0].text.strip()
@@ -627,13 +613,16 @@ def _generate_notes_claude(transcript_text: str) -> str:
     return ""
 
 
-def _call_gpt_text(system_prompt: str, user_prompt: str, label: str) -> str:
-    """GPT 텍스트 모드 호출 + 재시도 (show_me 등 자유형식 출력용)"""
+def _call_gpt_text(system_prompt: str, user_prompt: str, label: str,
+                    model_id: str | None = None) -> str:
+    """GPT 텍스트 모드 호출 + 재시도 (show_me 등 자유형식 출력용).
+    model_id가 None이면 LECTURE_GPT_MODEL을 사용한다."""
     max_tokens = 24000 if label == "notes" else 8000
+    use_model = model_id or LECTURE_GPT_MODEL
     for attempt in range(3):
         try:
             response = openai_client.chat.completions.create(
-                model=LECTURE_GPT_MODEL,
+                model=use_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -733,25 +722,26 @@ _SHOW_ME_SYSTEM_PROMPT = r"""당신은 학술 강의를 시각적으로 정리�
 """
 
 
-def _generate_show_me(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성: 마크다운 + 인라인 SVG 다이어그램"""
+def _generate_show_me(transcript_text: str, model_id: str | None = None) -> str:
+    """ShowMe 콘텐츠 생성 (GPT): 마크다운 + 인라인 SVG 다이어그램. model_id None이면 LECTURE_GPT_MODEL."""
     user = f"다음 강의 녹취록을 분석하고 시각적 요약을 생성하세요:\n\n{transcript_text}"
-    return _call_gpt_text(_SHOW_ME_SYSTEM_PROMPT, user, "show_me_gpt")
+    return _call_gpt_text(_SHOW_ME_SYSTEM_PROMPT, user, "show_me_gpt", model_id=model_id)
 
 
-def _generate_show_me_claude(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성 (Claude Opus): 마크다운 + 인라인 SVG 다이어그램"""
+def _generate_show_me_claude(transcript_text: str, model_id: str | None = None) -> str:
+    """ShowMe 콘텐츠 생성 (Claude): 마크다운 + 인라인 SVG 다이어그램. model_id None이면 LECTURE_NOTES_MODEL."""
     if not anthropic_client:
         print("    [ShowMe] Anthropic API 키 없음 — 건너뜀")
         return ""
 
+    use_model = model_id or LECTURE_NOTES_MODEL
     system = _SHOW_ME_SYSTEM_PROMPT
     user = f"다음 강의 녹취록을 분석하고 시각적 요약을 생성하세요:\n\n{transcript_text}"
 
     for attempt in range(3):
         try:
             response = anthropic_client.messages.create(
-                model=LECTURE_NOTES_MODEL,
+                model=use_model,
                 max_tokens=8000,
                 system=system,
                 messages=[{"role": "user", "content": user}],

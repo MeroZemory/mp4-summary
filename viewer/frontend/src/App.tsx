@@ -791,14 +791,297 @@ function DiagramModal({ svg, onClose }: { svg: string; onClose: () => void }) {
   )
 }
 
+// ─── Module versioning (ShowMe / Notes 재생성) ─────────────
+
+type ModuleName = 'show_me' | 'notes'
+type ModelKindName = 'gpt' | 'claude'
+
+type VersionMeta = {
+  version: number
+  model_id: string
+  created_at: string
+  is_baseline: boolean
+  job_id: string | null
+}
+
+type VersionsResponse = {
+  show_me: { gpt: VersionMeta[]; claude: VersionMeta[] }
+  notes: { gpt: VersionMeta[]; claude: VersionMeta[] }
+}
+
+type RegenModels = {
+  gpt: string[]
+  claude: string[]
+  defaults: { gpt: string; claude: string }
+}
+
+function useRegenModels() {
+  const [models, setModels] = useState<RegenModels | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/regen-models')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: RegenModels) => { if (!cancelled) setModels(data) })
+      .catch(() => { /* ignore — popover에서 default만 표시 */ })
+    return () => { cancelled = true }
+  }, [])
+  return models
+}
+
+type SlotState = {
+  versions: VersionMeta[]
+  selectedVersion: number | null  // null이면 fallback (baseline) 콘텐츠 표시
+  content: string
+  isLoading: boolean
+  regenJobId: string | null
+  regenError: string | null
+}
+
+function useModuleVersions(
+  lectureId: string,
+  module: ModuleName,
+  modelKind: ModelKindName,
+  fallbackContent: string,
+) {
+  const [state, setState] = useState<SlotState>({
+    versions: [],
+    selectedVersion: null,
+    content: fallbackContent,
+    isLoading: false,
+    regenJobId: null,
+    regenError: null,
+  })
+
+  // 모델 토글이 바뀌면 fallback도 바뀜 — versions 재조회 트리거
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/lectures/${encodeURIComponent(lectureId)}/versions`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: VersionsResponse) => {
+        if (cancelled) return
+        const slot = data[module][modelKind] ?? []
+        const latest = slot.length > 0 ? slot[0].version : null
+        setState((s) => ({
+          ...s,
+          versions: slot,
+          selectedVersion: latest,
+          // versions 가 비어있을 때만 fallbackContent 사용
+          content: latest === null ? fallbackContent : s.content,
+        }))
+      })
+      .catch(() => {
+        // 실패 시 fallback 콘텐츠로 동작
+        setState((s) => ({ ...s, versions: [], selectedVersion: null, content: fallbackContent }))
+      })
+    return () => { cancelled = true }
+  }, [lectureId, module, modelKind, fallbackContent])
+
+  // 선택된 버전 콘텐츠 fetch
+  useEffect(() => {
+    if (state.selectedVersion === null) return
+    let cancelled = false
+    setState((s) => ({ ...s, isLoading: true }))
+    fetch(
+      `/api/lectures/${encodeURIComponent(lectureId)}/versions/${module}/${modelKind}/${state.selectedVersion}`
+    )
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: { content: string }) => {
+        if (cancelled) return
+        setState((s) => ({ ...s, content: data.content, isLoading: false }))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setState((s) => ({ ...s, isLoading: false }))
+      })
+    return () => { cancelled = true }
+  }, [lectureId, module, modelKind, state.selectedVersion])
+
+  // regen 폴링
+  useEffect(() => {
+    const jobId = state.regenJobId
+    if (!jobId) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`)
+        if (!res.ok) return
+        const job: { status: string; error_message: string | null } = await res.json()
+        if (cancelled) return
+        if (job.status === 'completed') {
+          const r2 = await fetch(`/api/lectures/${encodeURIComponent(lectureId)}/versions`)
+          if (!r2.ok) return
+          const data: VersionsResponse = await r2.json()
+          if (cancelled) return
+          const slot = data[module][modelKind] ?? []
+          const newLatest = slot.length > 0 ? slot[0].version : null
+          setState((s) => ({
+            ...s,
+            versions: slot,
+            selectedVersion: newLatest,
+            regenJobId: null,
+            regenError: null,
+          }))
+        } else if (job.status === 'failed' || job.status === 'canceled') {
+          setState((s) => ({
+            ...s,
+            regenJobId: null,
+            regenError: job.error_message || `재생성 ${job.status}`,
+          }))
+        }
+      } catch {
+        // 네트워크 일시 오류 — 다음 tick 에서 재시도
+      }
+    }
+    const interval = window.setInterval(tick, 2000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [state.regenJobId, lectureId, module, modelKind])
+
+  const triggerRegen = useCallback(async (modelId: string): Promise<boolean> => {
+    setState((s) => ({ ...s, regenError: null }))
+    try {
+      const res = await fetch(`/api/lectures/${encodeURIComponent(lectureId)}/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module, model_kind: modelKind, model_id: modelId }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { detail?: string }
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const data: { job_id: string } = await res.json()
+      setState((s) => ({ ...s, regenJobId: data.job_id }))
+      return true
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e)
+      setState((s) => ({ ...s, regenError: message }))
+      return false
+    }
+  }, [lectureId, module, modelKind])
+
+  const setSelectedVersion = useCallback((v: number | null) => {
+    setState((s) => ({ ...s, selectedVersion: v }))
+  }, [])
+
+  return {
+    versions: state.versions,
+    selectedVersion: state.selectedVersion,
+    content: state.content,
+    isLoading: state.isLoading,
+    isRegenerating: state.regenJobId !== null,
+    regenError: state.regenError,
+    triggerRegen,
+    setSelectedVersion,
+  }
+}
+
+function VersionDropdown({
+  versions, selectedVersion, onSelect, disabled,
+}: {
+  versions: VersionMeta[]
+  selectedVersion: number | null
+  onSelect: (v: number) => void
+  disabled?: boolean
+}) {
+  if (versions.length === 0) return null
+  return (
+    <select
+      disabled={disabled}
+      value={selectedVersion ?? versions[0].version}
+      onChange={(e) => onSelect(parseInt(e.target.value, 10))}
+      className="text-[11px] font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md px-2 py-1 border-0 focus:ring-1 focus:ring-teal-400 disabled:opacity-50"
+      title="버전 선택"
+    >
+      {versions.map((v) => (
+        <option key={v.version} value={v.version}>
+          v{v.version}{v.is_baseline ? ' (기준)' : ''} · {v.model_id}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+function RegenButton({
+  regenModels, modelKind, isRegenerating, onTrigger,
+}: {
+  regenModels: RegenModels | null
+  modelKind: ModelKindName
+  isRegenerating: boolean
+  onTrigger: (modelId: string) => Promise<boolean>
+}) {
+  const [open, setOpen] = useState(false)
+  const candidates = regenModels?.[modelKind] ?? []
+  const defaultModel = regenModels?.defaults[modelKind] ?? candidates[0] ?? ''
+  const [selected, setSelected] = useState<string>(defaultModel)
+  useEffect(() => { if (defaultModel) setSelected(defaultModel) }, [defaultModel])
+
+  return (
+    <div className="relative inline-block">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={isRegenerating}
+        className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition flex items-center gap-1.5 ${
+          isRegenerating
+            ? 'bg-amber-100 text-amber-700 cursor-wait'
+            : 'bg-teal-50 text-teal-700 hover:bg-teal-100'
+        }`}
+        title="새 버전 생성"
+      >
+        {isRegenerating ? (
+          <>
+            <span className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+            <span>재생성 중…</span>
+          </>
+        ) : (
+          <>
+            <span>↻</span>
+            <span>재생성</span>
+          </>
+        )}
+      </button>
+      {open && !isRegenerating && (
+        <div
+          className="absolute right-0 top-full mt-1 z-20 bg-white rounded-xl shadow-lg border border-slate-200 p-3 min-w-[240px]"
+          onMouseLeave={() => setOpen(false)}
+        >
+          <label className="block text-[11px] font-medium text-slate-500 mb-1.5">모델 선택</label>
+          <select
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            className="w-full text-[12px] bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 mb-2"
+          >
+            {candidates.length === 0 && defaultModel && (
+              <option value={defaultModel}>{defaultModel}</option>
+            )}
+            {candidates.map((m) => (<option key={m} value={m}>{m}</option>))}
+          </select>
+          <button
+            onClick={async () => {
+              if (!selected) return
+              const ok = await onTrigger(selected)
+              if (ok) setOpen(false)
+            }}
+            className="w-full px-3 py-1.5 rounded-md bg-teal-600 hover:bg-teal-700 text-white text-[12px] font-medium transition"
+          >
+            새 버전 생성
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ShowMe({
+  lectureId,
   showMeGpt,
   showMeClaude,
   models,
+  regenModels,
 }: {
+  lectureId: string
   showMeGpt: string
   showMeClaude: string
   models?: LectureSummary['models']
+  regenModels: RegenModels | null
 }) {
   const hasGpt = showMeGpt.length > 0
   const hasClaude = showMeClaude.length > 0
@@ -806,54 +1089,85 @@ function ShowMe({
   const defaultModel: ShowMeModel = hasClaude ? 'claude' : 'gpt'
   const [model, setModel] = useState<ShowMeModel>(defaultModel)
 
-  const content = model === 'claude' ? showMeClaude : showMeGpt
-  const activeModel = model === 'claude' ? models?.claude_summary : models?.gpt_summary
-  const blocks = useMemo(() => parseShowMeContent(content), [content])
+  const fallback = model === 'claude' ? showMeClaude : showMeGpt
+  const slot = useModuleVersions(lectureId, 'show_me', model, fallback)
+
+  const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
+  const activeModelId =
+    currentMeta?.model_id ??
+    (model === 'claude' ? models?.claude_summary : models?.gpt_summary)
+  const blocks = useMemo(() => parseShowMeContent(slot.content), [slot.content])
 
   const hasBothModels = hasGpt && hasClaude
 
   return (
     <div className="px-5 py-4">
-      {/* Header row with model toggle */}
-      <div className="flex items-center justify-between mb-3">
+      {/* Header row with model toggle, version dropdown, regen button */}
+      <div className="flex items-center justify-between mb-3 gap-3">
         <div className="min-w-0">
           <h3 className="text-[15px] font-semibold text-slate-800">강의 시각화</h3>
-          {activeModel && <p className="mt-0.5 text-[11px] text-slate-400">{activeModel}</p>}
+          {activeModelId && (
+            <p className="mt-0.5 text-[11px] text-slate-400">
+              {activeModelId}
+              {currentMeta?.is_baseline && <span className="ml-1 text-amber-500">기준</span>}
+            </p>
+          )}
         </div>
 
-        {hasBothModels && (
-          <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-            <button
-              onClick={() => setModel('gpt')}
-              className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
-                model === 'gpt'
-                  ? 'bg-white text-emerald-700 shadow-sm'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              GPT
-            </button>
-            <button
-              onClick={() => setModel('claude')}
-              className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
-                model === 'claude'
-                  ? 'bg-white text-violet-700 shadow-sm'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              Opus
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          {hasBothModels && (
+            <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
+              <button
+                onClick={() => setModel('gpt')}
+                className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
+                  model === 'gpt'
+                    ? 'bg-white text-emerald-700 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                GPT
+              </button>
+              <button
+                onClick={() => setModel('claude')}
+                className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
+                  model === 'claude'
+                    ? 'bg-white text-violet-700 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                Opus
+              </button>
+            </div>
+          )}
+
+          <VersionDropdown
+            versions={slot.versions}
+            selectedVersion={slot.selectedVersion}
+            onSelect={slot.setSelectedVersion}
+          />
+
+          <RegenButton
+            regenModels={regenModels}
+            modelKind={model}
+            isRegenerating={slot.isRegenerating}
+            onTrigger={slot.triggerRegen}
+          />
+        </div>
       </div>
 
+      {slot.regenError && (
+        <div className="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[12px] text-red-700">
+          재생성 실패: {slot.regenError}
+        </div>
+      )}
+
       {/* Rendered blocks */}
-      <div>
+      <div className={slot.isLoading ? 'opacity-60 transition-opacity' : ''}>
         {blocks.map((block, i) => {
-          if (block.type === 'svg') return <SvgDiagram key={`${model}-${i}`} code={block.code} />
-          if (block.type === 'mermaid') return <MermaidDiagram key={`${model}-${i}`} code={block.code} />
-          if (block.type === 'csv') return <CsvTable key={`${model}-${i}`} data={block.data} />
-          return <MarkdownContent key={`${model}-${i}`} content={block.content} />
+          if (block.type === 'svg') return <SvgDiagram key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} code={block.code} />
+          if (block.type === 'mermaid') return <MermaidDiagram key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} code={block.code} />
+          if (block.type === 'csv') return <CsvTable key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} data={block.data} />
+          return <MarkdownContent key={`${model}-${slot.selectedVersion ?? 'fb'}-${i}`} content={block.content} />
         })}
       </div>
     </div>
@@ -964,15 +1278,19 @@ function StudyGuide({
 }
 
 function SummaryPanel({
+  lectureId,
   summary,
   onTimestampClick,
   collapsed,
   onToggleCollapse,
+  regenModels,
 }: {
+  lectureId: string
   summary: LectureSummary
   onTimestampClick: (time: string) => void
   collapsed: boolean
   onToggleCollapse: () => void
+  regenModels: RegenModels | null
 }) {
   return (
     <div className="border-b border-slate-200/80">
@@ -994,9 +1312,11 @@ function SummaryPanel({
           <div className="border-t border-slate-100">
             {(summary.show_me_gpt || summary.show_me_claude) ? (
               <ShowMe
+                lectureId={lectureId}
                 showMeGpt={summary.show_me_gpt ?? ''}
                 showMeClaude={summary.show_me_claude ?? ''}
                 models={summary.models}
+                regenModels={regenModels}
               />
             ) : (
               <OverviewCard overview={summary.overview} />
@@ -1020,49 +1340,90 @@ function SummaryPanel({
   )
 }
 
-function NotesSection({ notesGpt, notesClaude, models }: { notesGpt: string; notesClaude: string; models?: LectureSummary['models'] }) {
+function NotesSection({
+  lectureId, notesGpt, notesClaude, models, regenModels,
+}: {
+  lectureId: string
+  notesGpt: string
+  notesClaude: string
+  models?: LectureSummary['models']
+  regenModels: RegenModels | null
+}) {
   const hasGpt = notesGpt.length > 0
   const hasClaude = notesClaude.length > 0
   const [model, setModel] = useState<'gpt' | 'claude'>(hasClaude ? 'claude' : 'gpt')
   const [expanded, setExpanded] = useState(false)
-  const content = model === 'claude' ? notesClaude : notesGpt
-  const activeModel = model === 'claude' ? models?.claude_summary : models?.gpt_summary
+
+  const fallback = model === 'claude' ? notesClaude : notesGpt
+  const slot = useModuleVersions(lectureId, 'notes', model, fallback)
+  const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
+  const activeModelId =
+    currentMeta?.model_id ??
+    (model === 'claude' ? models?.claude_summary : models?.gpt_summary)
 
   return (
     <div className="px-5 py-4">
-      <div className="flex items-center justify-between mb-3">
-        <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-2 text-left">
+      <div className="flex items-center justify-between mb-3 gap-3">
+        <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-2 text-left min-w-0">
           <ChevronDownIcon className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`} />
           <h3 className="text-[14px] font-semibold text-slate-800">강의 정리</h3>
-          <span className="text-[11px] text-slate-400">강의를 대체할 수 있는 포괄적 노트</span>
-          {activeModel && <span className="text-[11px] text-slate-400">{activeModel}</span>}
+          <span className="text-[11px] text-slate-400 hidden sm:inline">강의를 대체할 수 있는 포괄적 노트</span>
+          {activeModelId && (
+            <span className="text-[11px] text-slate-400">
+              {activeModelId}
+              {currentMeta?.is_baseline && <span className="ml-1 text-amber-500">기준</span>}
+            </span>
+          )}
         </button>
 
-        {hasGpt && hasClaude && expanded && (
-          <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-            <button
-              onClick={() => setModel('gpt')}
-              className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
-                model === 'gpt' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              GPT
-            </button>
-            <button
-              onClick={() => setModel('claude')}
-              className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
-                model === 'claude' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              Opus
-            </button>
+        {expanded && (
+          <div className="flex items-center gap-2 shrink-0">
+            {hasGpt && hasClaude && (
+              <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
+                <button
+                  onClick={() => setModel('gpt')}
+                  className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
+                    model === 'gpt' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  GPT
+                </button>
+                <button
+                  onClick={() => setModel('claude')}
+                  className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
+                    model === 'claude' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  Opus
+                </button>
+              </div>
+            )}
+
+            <VersionDropdown
+              versions={slot.versions}
+              selectedVersion={slot.selectedVersion}
+              onSelect={slot.setSelectedVersion}
+            />
+
+            <RegenButton
+              regenModels={regenModels}
+              modelKind={model}
+              isRegenerating={slot.isRegenerating}
+              onTrigger={slot.triggerRegen}
+            />
           </div>
         )}
       </div>
 
+      {slot.regenError && (
+        <div className="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[12px] text-red-700">
+          재생성 실패: {slot.regenError}
+        </div>
+      )}
+
       {expanded && (
-        <div className="rounded-xl border border-slate-200 bg-white p-5">
-          <MarkdownContent content={content} />
+        <div className={`rounded-xl border border-slate-200 bg-white p-5 ${slot.isLoading ? 'opacity-60' : ''}`}>
+          <MarkdownContent content={slot.content} />
         </div>
       )}
     </div>
@@ -3178,6 +3539,9 @@ export default function App() {
     fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(setCurrentUser).catch(() => {})
   }, [])
 
+  // 모듈 재생성용 모델 후보 — 한 번만 fetch, 모든 강의가 공유
+  const regenModels = useRegenModels()
+
   // Lectures + domains fetched from server (도메인 그루핑용)
   const [lectures, setLectures] = useState<Lecture[]>([])
   const [domains, setDomains] = useState<DomainInfo[]>([])
@@ -3501,10 +3865,12 @@ export default function App() {
           {/* Summary panel */}
           {showSummary && (
             <SummaryPanel
+              lectureId={selected.id}
               summary={selected.summary!}
               onTimestampClick={scrollToSegment}
               collapsed={summaryCollapsed}
               onToggleCollapse={() => setSummaryCollapsed((v) => !v)}
+              regenModels={regenModels}
             />
           )}
 
@@ -3519,9 +3885,11 @@ export default function App() {
           {/* Comprehensive Notes (정리) — standalone section */}
           {selected.summary && (selected.summary.notes_gpt || selected.summary.notes_claude) && (
             <NotesSection
+              lectureId={selected.id}
               notesGpt={selected.summary.notes_gpt ?? ''}
               notesClaude={selected.summary.notes_claude ?? ''}
               models={selected.summary.models}
+              regenModels={regenModels}
             />
           )}
 
