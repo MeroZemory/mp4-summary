@@ -3642,21 +3642,29 @@ interface AnchorTocProps {
 function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
   const [active, setActive] = useState<ReaderTocKey>('overview')
 
-  // sticky TOC bar 높이 = 36. 여유 없이 정확히 TOC 바로 아래로 정렬.
-  const TOP_OFFSET = 36
+  // sticky TOC bar 높이 = 36. 콘텐츠 시작점(inner padding 안쪽) 이 TOC 바로 아래에 정렬되도록 한다.
+  const TOC_HEIGHT = 36
+
+  // anchor wrapper 의 inner padding-top 합산 — 첫 child 의 padding 도 고려.
+  const measureInnerPaddingTop = (el: HTMLElement): number => {
+    const own = parseFloat(getComputedStyle(el).paddingTop) || 0
+    const child = el.firstElementChild as HTMLElement | null
+    const childPad = child ? parseFloat(getComputedStyle(child).paddingTop) || 0 : 0
+    return Math.max(own, childPad)
+  }
 
   useEffect(() => {
     const root = scrollRef.current
     if (!root) return
     const onScroll = () => {
       const rootRect = root.getBoundingClientRect()
-      const trigger = TOP_OFFSET + 8
       let current: ReaderTocKey = READER_TOC_ITEMS[0].k
       for (const t of READER_TOC_ITEMS) {
         const el = root.querySelector<HTMLElement>('#section-' + t.k)
         if (!el) continue
-        const top = el.getBoundingClientRect().top - rootRect.top
-        if (top <= trigger) current = t.k
+        // 콘텐츠 시작점 (element top + inner padding) 이 TOC 바로 아래를 지났는지 판단
+        const contentTop = el.getBoundingClientRect().top - rootRect.top + measureInnerPaddingTop(el)
+        if (contentTop <= TOC_HEIGHT + 4) current = t.k
       }
       setActive(current)
     }
@@ -3672,7 +3680,10 @@ function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
     if (!el) return
     const rootRect = root.getBoundingClientRect()
     const elRect = el.getBoundingClientRect()
-    const target = elRect.top - rootRect.top + root.scrollTop - TOP_OFFSET
+    // 콘텐츠 시작점 = elementTop + inner padding-top 이 TOC 바로 아래에 위치하도록
+    const innerPad = measureInnerPaddingTop(el)
+    const contentTopAbsolute = elRect.top - rootRect.top + root.scrollTop + innerPad
+    const target = contentTopAbsolute - TOC_HEIGHT
     root.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
     setActive(k)
   }
