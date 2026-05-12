@@ -4038,11 +4038,82 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
 
-  const selected = useMemo(() => entries.find((e) => e.id === selectedId) ?? entries[0], [selectedId])
+  // build-time 임베딩된 강의 (개발용 정적 JSON) — fallback 으로만 사용
+  const buildTimeEntry = useMemo(() => entries.find((e) => e.id === selectedId) ?? null, [selectedId])
+
+  // 운영 backend 에서 단일 강의 데이터 fetch — entries 에 없는 새 강의도 정상 표시
+  type RemoteLectureData = {
+    id: string
+    corrected: TranscriptSegment[]
+    raw: TranscriptSegment[]
+    summary: LectureSummary | null
+  }
+  const [remoteData, setRemoteData] = useState<RemoteLectureData | null>(null)
+  const [remoteLoading, setRemoteLoading] = useState(false)
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!selectedId) {
+      setRemoteData(null)
+      return
+    }
+    // build-time entry 가 이미 있으면 굳이 fetch 하지 않음 (정적 데이터로 충분)
+    if (buildTimeEntry?.corrected || buildTimeEntry?.raw) {
+      setRemoteData(null)
+      return
+    }
+    let cancelled = false
+    setRemoteLoading(true)
+    setRemoteError(null)
+    fetch(`/api/lectures/${encodeURIComponent(selectedId)}/data`)
+      .then(async (r) => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}))
+          throw new Error(err.detail || `HTTP ${r.status}`)
+        }
+        return r.json() as Promise<RemoteLectureData>
+      })
+      .then((data) => {
+        if (cancelled) return
+        setRemoteData(data)
+        setRemoteLoading(false)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setRemoteData(null)
+        setRemoteLoading(false)
+        setRemoteError(e instanceof Error ? e.message : String(e))
+      })
+    return () => { cancelled = true }
+  }, [selectedId, buildTimeEntry])
+
+  // 강의 메타 (DB lectures)
   const selectedLecture = useMemo(
     () => lectures.find((l) => l.id === selectedId) ?? null,
     [lectures, selectedId],
   )
+
+  // selected = build-time entry OR remote data 로 통합. 둘 다 없으면 null.
+  // entries[0] 으로 폴백하지 않음 (다른 강의로 잘못 점프하던 버그 해결).
+  const selected = useMemo<TranscriptEntry | null>(() => {
+    if (buildTimeEntry) return buildTimeEntry
+    if (remoteData && (remoteData.corrected.length || remoteData.raw.length || remoteData.summary)) {
+      const correctedFile: RawFile | null = remoteData.corrected.length > 0
+        ? { key: `${remoteData.id}_corrected`, name: `${remoteData.id}_corrected`, data: remoteData.corrected, isSegments: true, segmentCount: remoteData.corrected.length }
+        : null
+      const rawFile: RawFile | null = remoteData.raw.length > 0
+        ? { key: `${remoteData.id}_raw`, name: `${remoteData.id}_raw`, data: remoteData.raw, isSegments: true, segmentCount: remoteData.raw.length }
+        : null
+      return {
+        id: remoteData.id,
+        label: (selectedLecture?.original_name || remoteData.id).replace(/\.(mp3|mp4)$/i, ''),
+        corrected: correctedFile,
+        raw: rawFile,
+        summary: remoteData.summary,
+      }
+    }
+    return null
+  }, [buildTimeEntry, remoteData, selectedLecture])
 
   const filteredEntries = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -4273,9 +4344,47 @@ export default function App() {
 
   function renderContent() {
     if (!selected || !activeFile) {
+      // 강의 처리 상태별로 안내 메시지 분기
+      const lec = selectedLecture
+      const status = lec?.latest_job_status
+      const stage = lec?.latest_job_type
+      let title = '파일을 선택해주세요'
+      let detail: string | null = null
+      if (selectedId && remoteLoading) {
+        title = '강의 데이터 불러오는 중…'
+      } else if (selectedId && remoteError) {
+        title = '강의 데이터를 불러올 수 없습니다'
+        detail = remoteError
+      } else if (lec) {
+        if (status === 'queued') {
+          title = '처리 대기 중인 강의입니다'
+          detail = '워커가 곧 처리를 시작합니다.'
+        } else if (status === 'processing') {
+          title = '처리 중인 강의입니다'
+          detail = stage === 'stt'
+            ? 'STT (음성 → 텍스트) 진행 중…'
+            : stage === 'correct'
+              ? '코렉션 진행 중…'
+              : stage === 'summary'
+                ? '요약 생성 중…'
+                : '강의 데이터를 만드는 중입니다.'
+        } else if (status === 'awaiting_domain') {
+          title = '도메인 컨펌이 필요한 강의입니다'
+          detail = '사이드바의 업로드 패널에서 도메인을 확인해 주세요.'
+        } else if (status === 'failed') {
+          title = '처리에 실패한 강의입니다'
+          detail = lec.latest_job_id ? '워커 로그를 확인해 주세요.' : null
+        } else {
+          title = '강의 데이터가 아직 준비되지 않았습니다'
+          detail = '잠시 후 다시 시도해 주세요.'
+        }
+      }
       return (
-        <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-          파일을 선택해주세요
+        <div className="h-full flex flex-col items-center justify-center gap-2 px-6 text-center">
+          <p style={{ fontSize: 14, color: 'var(--text-2)', margin: 0 }}>{title}</p>
+          {detail && (
+            <p style={{ fontSize: 12, color: 'var(--text-4)', margin: 0 }}>{detail}</p>
+          )}
         </div>
       )
     }

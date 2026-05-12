@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from auth import require_user
 from db import get_pool
 from domains import is_valid_domain_id
-from lecture_data import lecture_artifacts
+from lecture_data import get_lecture, lecture_artifacts, refresh_lecture
 
 router = APIRouter(prefix="/api/lectures", tags=["lectures"])
 
@@ -140,8 +140,53 @@ async def list_lectures(user: dict = Depends(require_user)) -> list[LectureRespo
     ]
 
 
+class LectureDataResponse(BaseModel):
+    """단일 강의의 corrected / raw segments + summary 페이로드.
+
+    frontend 가 build-time 임베딩된 JSON 대신 운영 in-memory store 에서
+    가져올 수 있게 한다. 처리 중 / 데이터 없음이면 corrected/summary 가 비어
+    있을 수 있다.
+    """
+    id: str
+    corrected: list[dict[str, Any]] = Field(default_factory=list)
+    raw: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] | None = None
+
+
+@router.get("/{lecture_id}/data", response_model=LectureDataResponse)
+async def get_lecture_data(
+    lecture_id: str,
+    user: dict = Depends(require_user),
+) -> LectureDataResponse:
+    """단일 강의의 corrected / raw / summary 데이터를 운영 in-memory store
+    에서 반환. 사용자 권한 확인 후 lecture_data.get_lecture(lecture_id) 결과
+    를 그대로 노출."""
+    user_id = uuid.UUID(user["id"])
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM lectures WHERE id = $1 AND user_id = $2",
+            lecture_id, user_id,
+        )
+    if row is None:
+        raise HTTPException(404, "강의를 찾을 수 없습니다")
+
+    # in-memory 캐시에 없으면 디스크에서 lazy refresh
+    data = get_lecture(lecture_id)
+    if data is None:
+        refresh_lecture(lecture_id)
+        data = get_lecture(lecture_id) or {}
+
+    return LectureDataResponse(
+        id=lecture_id,
+        corrected=data.get("corrected") or [],
+        raw=data.get("raw") or [],
+        summary=data.get("summary"),
+    )
+
+
 @router.get("/{lecture_id}", response_model=LectureResponse)
-async def get_lecture(lecture_id: str, user: dict = Depends(require_user)) -> LectureResponse:
+async def get_lecture_meta(lecture_id: str, user: dict = Depends(require_user)) -> LectureResponse:
     user_id = uuid.UUID(user["id"])
     pool = await get_pool()
     async with pool.acquire() as conn:
