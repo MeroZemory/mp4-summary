@@ -294,13 +294,14 @@ export function HybridShell({
                   </button>
                   {!groupCollapsed && g.lectures.map((l) => {
                     const active = l.id === activeLectureId
+                  const displayName = (l.original_name || l.id).replace(/\.(mp3|mp4)$/i, '')
                     return (
                       <button
                         key={l.id}
                         onClick={() => onLectureSelect?.(l.id)}
                         className={'ds-nav-item' + (active ? ' active' : '')}
                         style={{ alignItems: 'flex-start', padding: '7px 10px' }}
-                        title={l.original_name || l.id}
+                        title={displayName}
                       >
                         <span className="ds-nav-dot" style={{ marginTop: 6 }} />
                         <span style={{ minWidth: 0, flex: 1 }}>
@@ -315,7 +316,7 @@ export function HybridShell({
                               textOverflow: 'ellipsis',
                             }}
                           >
-                            {l.original_name || l.id}
+                            {displayName}
                           </span>
                           {l.latest_job_status && l.latest_job_status !== 'completed' && (
                             <span

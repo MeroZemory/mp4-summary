@@ -3213,7 +3213,7 @@ export function LectureGroups({
               <div className="mt-1 space-y-px">
                 {group.lectures.map((lec) => {
                   const entry = entryById.get(lec.id)
-                  const label = entry?.label ?? lec.original_name.replace(/\.mp4$/i, '')
+                  const label = entry?.label ?? lec.original_name.replace(/\.(mp3|mp4)$/i, '')
                   const isActive = lec.id === selectedId
                   const count = entry?.corrected?.segmentCount ?? entry?.raw?.segmentCount ?? 0
                   const hasContent = !!entry
