@@ -4044,6 +4044,7 @@ export default function App() {
   // 운영 backend 에서 단일 강의 데이터 fetch — entries 에 없는 새 강의도 정상 표시
   type RemoteLectureData = {
     id: string
+    original_name: string | null
     corrected: TranscriptSegment[]
     raw: TranscriptSegment[]
     summary: LectureSummary | null
@@ -4112,9 +4113,12 @@ export default function App() {
       const rawFile: RawFile | null = remoteData.raw.length > 0
         ? { key: `${remoteData.id}_raw`, name: `${remoteData.id}_raw`, data: remoteData.raw, isSegments: true, segmentCount: remoteData.raw.length }
         : null
+      // 사용자에게 보일 제목: selectedLecture.original_name (DB) → remoteData.original_name
+      // (서버 fetch 응답) → 최후 fallback 으로만 lecture_id. 확장자 .mp3/.mp4 는 제거.
+      const displayName = selectedLecture?.original_name || remoteData.original_name || remoteData.id
       return {
         id: remoteData.id,
-        label: (selectedLecture?.original_name || remoteData.id).replace(/\.(mp3|mp4)$/i, ''),
+        label: displayName.replace(/\.(mp3|mp4)$/i, ''),
         corrected: correctedFile,
         raw: rawFile,
         summary: remoteData.summary,

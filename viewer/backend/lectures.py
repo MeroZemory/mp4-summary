@@ -148,6 +148,7 @@ class LectureDataResponse(BaseModel):
     있을 수 있다.
     """
     id: str
+    original_name: str | None = None
     corrected: list[dict[str, Any]] = Field(default_factory=list)
     raw: list[dict[str, Any]] = Field(default_factory=list)
     summary: dict[str, Any] | None = None
@@ -165,7 +166,7 @@ async def get_lecture_data(
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT 1 FROM lectures WHERE id = $1 AND user_id = $2",
+            "SELECT original_name FROM lectures WHERE id = $1 AND user_id = $2",
             lecture_id, user_id,
         )
     if row is None:
@@ -179,6 +180,7 @@ async def get_lecture_data(
 
     return LectureDataResponse(
         id=lecture_id,
+        original_name=row["original_name"],
         corrected=data.get("corrected") or [],
         raw=data.get("raw") or [],
         summary=data.get("summary"),
