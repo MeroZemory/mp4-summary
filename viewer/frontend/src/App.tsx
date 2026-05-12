@@ -4053,18 +4053,20 @@ export default function App() {
   const [remoteError, setRemoteError] = useState<string | null>(null)
 
   useEffect(() => {
+    // selectedId 변경 시 이전 remoteData 를 즉시 비워 옛 강의가 잠깐 비치는
+    // 현상을 막는다 ("다른 강의로 리디렉션됨" 버그 원인).
+    setRemoteData(null)
+    setRemoteError(null)
     if (!selectedId) {
-      setRemoteData(null)
+      setRemoteLoading(false)
       return
     }
-    // build-time entry 가 이미 있으면 굳이 fetch 하지 않음 (정적 데이터로 충분)
     if (buildTimeEntry?.corrected || buildTimeEntry?.raw) {
-      setRemoteData(null)
+      setRemoteLoading(false)
       return
     }
     let cancelled = false
     setRemoteLoading(true)
-    setRemoteError(null)
     fetch(`/api/lectures/${encodeURIComponent(selectedId)}/data`)
       .then(async (r) => {
         if (!r.ok) {
@@ -4094,10 +4096,16 @@ export default function App() {
   )
 
   // selected = build-time entry OR remote data 로 통합. 둘 다 없으면 null.
-  // entries[0] 으로 폴백하지 않음 (다른 강의로 잘못 점프하던 버그 해결).
+  // 가드: remoteData.id 가 현재 selectedId 와 일치해야만 사용 — 강의 전환 직후
+  // 잠시 옛 remoteData 가 selected 에 비치며 다른 강의로 리디렉션된 것처럼
+  // 보이던 버그 방지.
   const selected = useMemo<TranscriptEntry | null>(() => {
     if (buildTimeEntry) return buildTimeEntry
-    if (remoteData && (remoteData.corrected.length || remoteData.raw.length || remoteData.summary)) {
+    if (
+      remoteData &&
+      remoteData.id === selectedId &&
+      (remoteData.corrected.length || remoteData.raw.length || remoteData.summary)
+    ) {
       const correctedFile: RawFile | null = remoteData.corrected.length > 0
         ? { key: `${remoteData.id}_corrected`, name: `${remoteData.id}_corrected`, data: remoteData.corrected, isSegments: true, segmentCount: remoteData.corrected.length }
         : null
@@ -4113,7 +4121,7 @@ export default function App() {
       }
     }
     return null
-  }, [buildTimeEntry, remoteData, selectedLecture])
+  }, [buildTimeEntry, remoteData, selectedId, selectedLecture])
 
   const filteredEntries = useMemo(() => {
     const q = search.trim().toLowerCase()
