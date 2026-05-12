@@ -4719,7 +4719,10 @@ export default function App() {
                   )}
                 </div>
                 <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {selected.label}
+                  {/* selectedLecture.original_name (DB) 가 가장 정확. build-time
+                      entries.label 은 underscore 를 공백으로 변환해서 file_hash
+                      형식 lecture_id 가 보기 흉하게 표시될 수 있다. */}
+                  {(selectedLecture?.original_name?.replace(/\.(mp3|mp4)$/i, '') || selected.label)}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
