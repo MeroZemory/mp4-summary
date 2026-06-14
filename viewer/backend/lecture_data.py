@@ -14,10 +14,19 @@ _reload_lock = threading.Lock()
 
 
 def _extract_base(filename: str) -> str:
-    """파일명에서 base name 추출 (확장자, 해시, 접미사 제거)"""
+    """파일명에서 base name(=lecture_id) 추출.
+
+    cache key 형식: `{stem}_{stage}_{md5_short}.json`. 새 lecture_id 가
+    file_hash 기반으로 끝이 hex 인 케이스가 있어 stage 키워드를 명시적으로
+    매치해 한 번에 제거 — `_[a-f0-9]{6,}$` 단독으로 잘라내면 lecture_id 의
+    hash 부분을 침범할 수 있다.
+    """
     name = filename.replace(".json", "")
-    name = re.sub(r"_[a-f0-9]{6,}$", "", name)
-    name = re.sub(r"_(corrected|raw_transcript|summary)$", "", name)
+    name = re.sub(
+        r"_(corrected|raw_transcript|summary|transcript_md)_[a-f0-9]{6,}$",
+        "",
+        name,
+    )
     return name
 
 
@@ -100,3 +109,12 @@ def get_lecture_ids() -> list[str]:
 
 def get_lecture(lecture_id: str) -> dict | None:
     return LECTURE_DATA.get(lecture_id)
+
+
+def lecture_artifacts(lecture_id: str) -> dict:
+    """API 응답용 — 강의의 코렉션/요약 보유 여부."""
+    data = LECTURE_DATA.get(lecture_id) or {}
+    return {
+        "has_corrected": bool(data.get("corrected")),
+        "has_summary": bool(data.get("summary")),
+    }

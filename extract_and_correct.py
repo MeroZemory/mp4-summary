@@ -1,5 +1,5 @@
 """
-MP4 → STT(ElevenLabs/Whisper) → GPT-5.4 교정 파이프라인
+MP4 → STT(ElevenLabs/Whisper) → GPT 교정/요약 파이프라인
 
 ElevenLabs Scribe v2 (화자분리 지원) 또는 Whisper를 선택 가능.
 최대 20 워커 병렬 처리, 옵션 조합별 캐시 관리.
@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -48,9 +49,11 @@ OPENAI_API_KEY = _cfg("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = _cfg("ELEVENLABS_API_KEY")
 STT_PROVIDER = _cfg("STT_PROVIDER", "elevenlabs")  # "elevenlabs" or "whisper"
 MAX_WORKERS = int(_cfg("MAX_WORKERS", "20"))
-CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4")
+CORRECTION_MODEL = _cfg("CORRECTION_MODEL", "gpt-5.4-mini")
 ANTHROPIC_API_KEY = _cfg("ANTHROPIC_API_KEY")
 DOMAIN_DETECTION = _cfg("DOMAIN_DETECTION", "auto")  # "auto", "generic", or a domain ID
+LECTURE_GPT_MODEL = _cfg("LECTURE_GPT_MODEL", "gpt-5.5")  # GPT 요약/정리 모델
+LECTURE_NOTES_MODEL = _cfg("LECTURE_NOTES_MODEL", "claude-opus-4-7")  # Claude 요약/정리 모델
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY를 찾을 수 없습니다. .env를 확인하세요.")
@@ -64,7 +67,12 @@ OUTPUT_DIR = SCRIPT_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DOWNLOADS_DIR = SCRIPT_DIR / "downloads"
-MP4_FILES = sorted(DOWNLOADS_DIR.glob("*.mp4")) if DOWNLOADS_DIR.exists() else []
+# MP4(영상) 또는 MP3(추출 단계 스킵) 둘 다 허용
+MEDIA_FILES: list[Path] = (
+    sorted([*DOWNLOADS_DIR.glob("*.mp4"), *DOWNLOADS_DIR.glob("*.mp3")])
+    if DOWNLOADS_DIR.exists()
+    else []
+)
 
 # ElevenLabs 파일 크기 제한
 ELEVENLABS_MAX_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
@@ -88,18 +96,42 @@ def cache_path_for(video_stem: str, stage: str) -> Path:
     return OUTPUT_DIR / f"{key}.json"
 
 
+def summary_cache_path_for(video_stem: str) -> Path:
+    """교정 모델과 요약 모델 조합을 모두 반영한 요약 캐시 경로."""
+    model_key = f"{CORRECTION_MODEL}_{LECTURE_GPT_MODEL}_{LECTURE_NOTES_MODEL}"
+    key = make_cache_key(video_stem, STT_PROVIDER, model_key, "summary")
+    return OUTPUT_DIR / f"{key}.json"
+
+
+def latest_cache_path_for(video_stem: str, stage: str) -> Path | None:
+    """모델 변경 전 생성된 캐시까지 포함해 가장 최근 stage 캐시를 찾는다."""
+    candidates = sorted(
+        OUTPUT_DIR.glob(f"{video_stem}_{stage}_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
 # ── 1단계: 오디오 추출 ────────────────────────────────────────────────────────
 
-def extract_audio(mp4_path: Path) -> Path:
-    """MP4에서 오디오를 MP3로 추출 (캐시됨)"""
-    audio_path = OUTPUT_DIR / f"{mp4_path.stem}.mp3"
+def extract_audio(media_path: Path) -> Path:
+    """MP4면 오디오를 MP3로 추출, MP3 입력이면 음성 추출 단계 건너뛰고 그대로 사용 (캐시됨)"""
+    audio_path = OUTPUT_DIR / f"{media_path.stem}.mp3"
     if audio_path.exists():
         print(f"  [캐시] 오디오: {audio_path.name}")
         return audio_path
 
-    print(f"  오디오 추출 중: {mp4_path.name}")
+    # MP3 입력은 추출 없이 출력 위치로 복사 (이미 같은 경로면 위 캐시 분기에서 종료됨)
+    if media_path.suffix.lower() == ".mp3":
+        shutil.copy2(media_path, audio_path)
+        size_mb = audio_path.stat().st_size / (1024 * 1024)
+        print(f"  MP3 입력 — 음성 추출 단계 건너뜀 ({size_mb:.1f}MB)")
+        return audio_path
+
+    print(f"  오디오 추출 중: {media_path.name}")
     subprocess.run(
-        ["ffmpeg", "-i", str(mp4_path),
+        ["ffmpeg", "-i", str(media_path),
          "-vn", "-acodec", "libmp3lame", "-ab", "64k",
          "-ar", "16000", "-ac", "1", "-y", str(audio_path)],
         capture_output=True, check=True,
@@ -292,6 +324,10 @@ def transcribe_audio_parallel(audio_path: Path, provider: str) -> list[dict]:
     if cp.exists():
         print(f"  [캐시] 트랜스크립트: {cp.name}")
         return json.loads(cp.read_text(encoding="utf-8"))
+    latest_cp = latest_cache_path_for(audio_path.stem, "raw_transcript")
+    if latest_cp:
+        print(f"  [캐시] 트랜스크립트: {latest_cp.name}")
+        return json.loads(latest_cp.read_text(encoding="utf-8"))
 
     all_segments = _do_transcribe(audio_path, provider)
 
@@ -494,7 +530,7 @@ def _call_gpt_json(system_prompt: str, user_prompt: str, label: str) -> dict:
     for attempt in range(3):
         try:
             response = openai_client.chat.completions.create(
-                model=CORRECTION_MODEL,
+                model=LECTURE_GPT_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -527,9 +563,7 @@ JSON 형식으로 응답하세요: {"title": "강의 제목 (20자 이내)", "su
     return {"title": result.get("title", ""), "summary": result.get("summary", "")}
 
 
-def _generate_notes(transcript_text: str) -> str:
-    """강의 정리 — 강의를 안 봐도 핵심 전체를 이해할 수 있는 포괄적 노트"""
-    system = r"""당신은 대학 강의를 체계적으로 정리하는 전문가입니다.
+_NOTES_SYSTEM_PROMPT = r"""당신은 대학 강의를 체계적으로 정리하는 전문가입니다.
 강의 녹취록을 읽고, 강의를 직접 듣지 않더라도 모든 핵심 내용을 이해할 수 있는 포괄적인 강의 노트를 작성하세요.
 
 ## 핵심 원칙
@@ -545,39 +579,27 @@ def _generate_notes(transcript_text: str) -> str:
 - 수식, 수치, 구체적 예시가 있으면 반드시 포함
 - 분량 제한 없음 — 내용이 많으면 길게 작성"""
 
+
+def _generate_notes(transcript_text: str, model_id: str | None = None) -> str:
+    """강의 정리 — GPT 버전. model_id None이면 LECTURE_GPT_MODEL."""
     user = f"다음 강의 녹취록을 읽고 포괄적인 강의 노트를 작성하세요:\n\n{transcript_text}"
-    return _call_gpt_text(system, user, "notes")
+    return _call_gpt_text(_NOTES_SYSTEM_PROMPT, user, "notes", model_id=model_id)
 
 
-def _generate_notes_claude(transcript_text: str) -> str:
-    """강의 정리 — Claude Opus 버전"""
+def _generate_notes_claude(transcript_text: str, model_id: str | None = None) -> str:
+    """강의 정리 — Claude 버전. model_id None이면 LECTURE_NOTES_MODEL."""
     if not anthropic_client:
         return ""
 
-    system = r"""당신은 대학 강의를 체계적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 강의를 직접 듣지 않더라도 모든 핵심 내용을 이해할 수 있는 포괄적인 강의 노트를 작성하세요.
-
-## 핵심 원칙
-1. **누락 없음**: 강의에서 언급된 모든 핵심 개념, 방법론, 연구 결과, 데이터셋, 모델을 빠짐없이 포함
-2. **자기완결적**: 이 노트만 읽으면 강의 전체 내용을 이해할 수 있어야 함
-3. **구조 최적화**: 강의 흐름이 논리적이면 유지하되, 더 나은 이해를 위해 재구성해도 됨
-4. **깊이 유지**: 피상적 요약이 아닌, 개념의 원리·배경·적용까지 설명
-
-## 형식
-- 마크다운 사용 (##, ###, -, **bold**, `code` 등)
-- 한국어로 작성, 영어 전문 용어는 원문 유지
-- 관련 타임스탬프를 [HH:MM:SS] 형식으로 인용 (해당 내용이 강의에서 다뤄진 시점)
-- 수식, 수치, 구체적 예시가 있으면 반드시 포함
-- 분량 제한 없음 — 내용이 많으면 길게 작성"""
-
+    use_model = model_id or LECTURE_NOTES_MODEL
     user = f"다음 강의 녹취록을 읽고 포괄적인 강의 노트를 작성하세요:\n\n{transcript_text}"
 
     for attempt in range(3):
         try:
             response = anthropic_client.messages.create(
-                model="claude-opus-4-6",
+                model=use_model,
                 max_tokens=16000,
-                system=system,
+                system=_NOTES_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user}],
             )
             return response.content[0].text.strip()
@@ -591,19 +613,26 @@ def _generate_notes_claude(transcript_text: str) -> str:
     return ""
 
 
-def _call_gpt_text(system_prompt: str, user_prompt: str, label: str) -> str:
-    """GPT 텍스트 모드 호출 + 재시도 (show_me 등 자유형식 출력용)"""
+def _call_gpt_text(system_prompt: str, user_prompt: str, label: str,
+                    model_id: str | None = None) -> str:
+    """GPT 텍스트 모드 호출 + 재시도 (show_me 등 자유형식 출력용).
+    model_id가 None이면 LECTURE_GPT_MODEL을 사용한다."""
+    max_tokens = 24000 if label == "notes" else 8000
+    use_model = model_id or LECTURE_GPT_MODEL
     for attempt in range(3):
         try:
             response = openai_client.chat.completions.create(
-                model=CORRECTION_MODEL,
+                model=use_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_completion_tokens=8000,
+                max_completion_tokens=max_tokens,
             )
-            return response.choices[0].message.content.strip()
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                raise ValueError("empty GPT response")
+            return content
         except openai.RateLimitError:
             wait = 60 * (attempt + 1)
             print(f"    [ShowMe] Rate limit ({label}) — {wait}초 대기")
@@ -618,110 +647,67 @@ def _call_gpt_text(system_prompt: str, user_prompt: str, label: str) -> str:
     return ""
 
 
-def _generate_show_me(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성: 마크다운 + Mermaid 다이어그램"""
-    system = r"""당신은 학술 강의를 시각적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 마크다운 텍스트와 Mermaid 다이어그램을 혼합한 시각적 요약을 만드세요.
+_SHOW_ME_SYSTEM_PROMPT = r"""당신은 학술 강의를 시각적으로 정리하는 디자이너 겸 프론트엔드 엔지니어입니다.
+강의 녹취록을 읽고, 한 페이지짜리 HTML 단편(fragment) 을 작성하세요.
 
-## 출력 형식 규칙
+## 출력 형식
 
-1. 일반 텍스트는 마크다운 형식 (##, **, -, 등)
-2. 다이어그램은 반드시 ```mermaid 코드 블록으로 감쌈
-3. 한국어로 작성하되, 영어 전문 용어는 원문 유지
+- 응답 전체가 **단일 HTML 단편** 입니다. 마크다운 wrapper, 코드 펜스(```), 주석 설명 모두 금지.
+- `<html>`, `<head>`, `<body>` 같은 root 요소는 쓰지 마세요. 그 안에 들어갈 자식 요소들만 직접 작성하세요 (예: `<section>...</section><figure><svg>...</svg></figure>...`).
+- SVG 다이어그램은 인라인 `<svg>` 태그로 직접 포함. `viewBox` 와 `xmlns="http://www.w3.org/2000/svg"` 를 명시.
+- CSS 는 `<style>` 블록 또는 element 의 `style` 속성으로 작성. 외부 CSS 로드 금지.
+- 한국어로 작성하되, 영어 전문 용어는 원문 유지.
 
-## 필수 포함 섹션
+## 보안 — 절대 금지
 
-### 1. 강의 개요 (1~2문단 마크다운)
-강의 핵심을 간결하게 요약
+- `<script>` 태그
+- `onclick`, `onload` 등 모든 `on*` 이벤트 핸들러 속성
+- 외부 리소스 참조: `<img src="https://...">`, `<image href="...">`, 외부 폰트 URL, `xlink:href` 의 외부 URL 등 모든 네트워크 로드
 
-### 2. 강의 흐름도 (Mermaid flowchart)
-강의의 주제 전개를 flowchart TD로 표현. 5~8개 노드.
-예시:
-```mermaid
-flowchart TD
-    A["서론: 강의 목표 소개"] --> B["배경: 기존 연구 리뷰"]
-    B --> C["방법론: 새로운 접근법"]
-    C --> D["결과: 실험 분석"]
-    D --> E["결론: 향후 과제"]
-```
+## 콘텐츠
 
-### 3. 핵심 개념 관계도 (Mermaid graph)
-주요 개념 간의 관계를 graph LR 또는 graph TD로 표현. 8~15개 노드.
-노드 라벨에 특수문자(괄호, 슬래시 등)가 있으면 반드시 큰따옴표로 감싸세요.
-예시:
-```mermaid
-graph LR
-    A["Pharmacogenomics"] --> B["CYP450"]
-    A --> C["Drug Response"]
-    B --> D["CYP2D6"]
-```
+페이지에는 최소한 다음 요소를 포함하세요:
 
-## Mermaid 문법 주의사항
-- 노드 ID는 영문/숫자만 사용 (A, B, node1 등)
-- 노드 라벨은 ["텍스트"] 형식으로 항상 큰따옴표 사용
-- 화살표: --> (기본), -.-> (점선), ==> (굵은)
-- 괄호, 슬래시, 특수문자는 라벨 안에서만 사용 (큰따옴표 필수)
-- subgraph 사용 가능"""
+1. **강의 개요** — 강의 핵심을 자기완결적으로 요약하는 짧은 도입부.
+2. **강의 흐름도(SVG)** — 강의의 주제 전개나 논리 흐름을 시각화한 인라인 SVG.
+3. **핵심 개념 관계도(SVG)** — 주요 개념과 그 관계를 시각화. 흐름도와 다른 관점/구도로.
 
+여기에 강의에 어울리는 추가 시각 요소(타임라인, 비교 표, 인용 카드, 콜아웃 등)를 자유롭게 더하세요.
+
+## 디자인 가이드
+
+- 색상 · 폰트 · 노드 모양 · 카드 / 그리드 / 박스 레이아웃 · 정보 밀도는 강의 분위기에 맞게 **자유롭게 결정**. 강의 주제와 어울리는 톤을 직접 선택해도 됩니다.
+- **반드시 라이트 톤(light theme) 으로 작성**:
+  - 페이지 배경은 **흰색 또는 매우 옅은 중성** (off-white, cream, paper, soft beige, light gray 등) 만 사용.
+  - 본문 텍스트는 짙은 슬레이트 / 차콜 / 네이비 등 충분히 진한 색.
+  - 강조는 채도 있는 컬러(teal · indigo · amber · sky · rose 등)를 라이트 배경 위 액센트로 사용.
+  - **다크 배경 패널 / 다크 카드 / 검정 또는 매우 어두운 풀-블리드 영역 사용 금지.** 어두운 톤은 텍스트나 얇은 스트로크 같은 라인에만 한정.
+- 하나의 페이지 안에서는 시각 톤(팔레트, 폰트 시스템, 모서리 둥글기, 여백 리듬) 을 일관되게 유지하세요.
+- SVG 의 좌표/도형은 모두 `viewBox` 영역 안에 들어가도록 검산. 텍스트가 노드를 벗어나거나 도형이 서로 겹치지 않게 여유를 둘 것.
+- 가능하면 같은 페이지 안의 SVG 들은 같은 viewBox 비율을 사용해 보기 좋게.
+"""
+
+
+def _generate_show_me(transcript_text: str, model_id: str | None = None) -> str:
+    """ShowMe 콘텐츠 생성 (GPT): 마크다운 + 인라인 SVG 다이어그램. model_id None이면 LECTURE_GPT_MODEL."""
     user = f"다음 강의 녹취록을 분석하고 시각적 요약을 생성하세요:\n\n{transcript_text}"
-    return _call_gpt_text(system, user, "show_me_gpt")
+    return _call_gpt_text(_SHOW_ME_SYSTEM_PROMPT, user, "show_me_gpt", model_id=model_id)
 
 
-def _generate_show_me_claude(transcript_text: str) -> str:
-    """ShowMe 콘텐츠 생성 (Claude Opus 4.6)"""
+def _generate_show_me_claude(transcript_text: str, model_id: str | None = None) -> str:
+    """ShowMe 콘텐츠 생성 (Claude): 마크다운 + 인라인 SVG 다이어그램. model_id None이면 LECTURE_NOTES_MODEL."""
     if not anthropic_client:
         print("    [ShowMe] Anthropic API 키 없음 — 건너뜀")
         return ""
 
-    system = r"""당신은 학술 강의를 시각적으로 정리하는 전문가입니다.
-강의 녹취록을 읽고, 마크다운 텍스트와 Mermaid 다이어그램을 혼합한 시각적 요약을 만드세요.
-
-## 출력 형식 규칙
-
-1. 일반 텍스트는 마크다운 형식 (##, **, -, 등)
-2. 다이어그램은 반드시 ```mermaid 코드 블록으로 감쌈
-3. 한국어로 작성하되, 영어 전문 용어는 원문 유지
-
-## 필수 포함 섹션
-
-### 1. 강의 개요 (1~2문단 마크다운)
-강의 핵심을 간결하게 요약
-
-### 2. 강의 흐름도 (Mermaid flowchart)
-강의의 주제 전개를 flowchart TD로 표현. 5~8개 노드.
-예시:
-```mermaid
-flowchart TD
-    A["서론: 강의 목표 소개"] --> B["배경: 기존 연구 리뷰"]
-    B --> C["방법론: 새로운 접근법"]
-    C --> D["결과: 실험 분석"]
-    D --> E["결론: 향후 과제"]
-```
-
-### 3. 핵심 개념 관계도 (Mermaid graph)
-주요 개념 간의 관계를 graph LR 또는 graph TD로 표현. 8~15개 노드.
-노드 라벨에 특수문자(괄호, 슬래시 등)가 있으면 반드시 큰따옴표로 감싸세요.
-예시:
-```mermaid
-graph LR
-    A["Pharmacogenomics"] --> B["CYP450"]
-    A --> C["Drug Response"]
-    B --> D["CYP2D6"]
-```
-
-## Mermaid 문법 주의사항
-- 노드 ID는 영문/숫자만 사용 (A, B, node1 등)
-- 노드 라벨은 ["텍스트"] 형식으로 항상 큰따옴표 사용
-- 화살표: --> (기본), -.-> (점선), ==> (굵은)
-- 괄호, 슬래시, 특수문자는 라벨 안에서만 사용 (큰따옴표 필수)
-- subgraph 사용 가능"""
-
+    use_model = model_id or LECTURE_NOTES_MODEL
+    system = _SHOW_ME_SYSTEM_PROMPT
     user = f"다음 강의 녹취록을 분석하고 시각적 요약을 생성하세요:\n\n{transcript_text}"
 
     for attempt in range(3):
         try:
             response = anthropic_client.messages.create(
-                model="claude-opus-4-6",
+                model=use_model,
                 max_tokens=8000,
                 system=system,
                 messages=[{"role": "user", "content": user}],
@@ -780,7 +766,7 @@ relevant_time은 해당 내용이 다뤄진 시점의 타임스탬프입니다."
 
 def generate_lecture_summary(corrected_segments: list[dict], video_name: str) -> dict:
     """교정된 트랜스크립트로부터 강의 요약 생성 (4개 섹션 병렬)"""
-    cp = cache_path_for(video_name, "summary")
+    cp = summary_cache_path_for(video_name)
     if cp.exists():
         print(f"  [캐시] 요약: {cp.name}")
         return json.loads(cp.read_text(encoding="utf-8"))
@@ -793,19 +779,21 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
     transcript_text = "\n".join(f"[{s['time']}] {s['text']}" for s in corrected_segments)
     valid_times = [s["time"] for s in corrected_segments]
 
-    print(f"  요약 생성: 8개 섹션 병렬 처리 | 모델: {CORRECTION_MODEL} + Claude Opus 4.6")
+    print(
+        f"  요약 생성: 6개 섹션 병렬 처리 | "
+        f"메타·Q&A: {LECTURE_GPT_MODEL} | ShowMe·Notes: {LECTURE_NOTES_MODEL}"
+    )
 
-    # 8개 섹션 병렬 생성
-    results = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    # ShowMe / Notes 의 GPT 변형은 임시 비활성화 — Opus(Claude) 단독 사용.
+    # GPT 의 SVG 생성 품질이 낮아 viewer 토글에서도 제거됨.
+    results: dict[str, object] = {"show_me_gpt": "", "notes_gpt": ""}
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(_generate_overview, transcript_text): "overview",
             executor.submit(_generate_key_concepts, transcript_text): "key_concepts",
             executor.submit(_generate_timeline, transcript_text): "timeline",
             executor.submit(_generate_study_guide, transcript_text): "study_guide",
-            executor.submit(_generate_show_me, transcript_text): "show_me_gpt",
             executor.submit(_generate_show_me_claude, transcript_text): "show_me_claude",
-            executor.submit(_generate_notes, transcript_text): "notes_gpt",
             executor.submit(_generate_notes_claude, transcript_text): "notes_claude",
         }
         for future in as_completed(futures):
@@ -841,6 +829,11 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "video": video_name,
+        "models": {
+            "correction": CORRECTION_MODEL,
+            "gpt_summary": LECTURE_GPT_MODEL,
+            "claude_summary": LECTURE_NOTES_MODEL,
+        },
         "overview": results.get("overview", {"title": "", "summary": ""}),
         "key_concepts": results.get("key_concepts", []),
         "timeline": results.get("timeline", []),
@@ -858,26 +851,36 @@ def generate_lecture_summary(corrected_segments: list[dict], video_name: str) ->
 
 # ── 메인 파이프라인 ───────────────────────────────────────────────────────────
 
-def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict:
-    """단일 비디오 처리. stages가 None이면 전체, 아니면 지정 단계만 실행.
-    stages: {"audio", "stt", "correct", "summary"} 중 선택"""
+def process_single_video(
+    media_path: Path,
+    stages: set[str] | None = None,
+    forced_domain_id: str | None = None,
+) -> dict:
+    """단일 영상/오디오 파일(MP4 또는 MP3)을 처리.
+    stages가 None이면 전체, 아니면 지정 단계만 실행.
+    stages: {"audio", "stt", "correct", "summary"} 중 선택.
+    MP3 입력이면 audio 단계가 추출 없이 출력 위치로의 복사로 처리됨.
+    forced_domain_id: 코렉션 단계에서 자동 감지를 건너뛰고 강제로 사용할 도메인 ID."""
     run_all = stages is None
-    video_name = mp4_path.stem
+    video_name = media_path.stem
     print(f"\n{'='*70}")
-    print(f"처리 시작: {mp4_path.name}")
+    print(f"처리 시작: {media_path.name}")
     stage_names = "전체" if run_all else ", ".join(sorted(stages))
     print(f"  STT: {STT_PROVIDER} | 교정: {CORRECTION_MODEL} | 단계: {stage_names}")
+    if forced_domain_id:
+        print(f"  강제 도메인: {forced_domain_id}")
     print(f"{'='*70}")
 
     start_time = time.time()
     raw_segments = []
     corrected_segments = []
     summary = {}
+    detected_match: DomainMatch | None = None
 
-    # 1. 오디오 추출
+    # 1. 오디오 추출 (MP3 입력이면 추출 없이 복사로 처리)
     if run_all or "audio" in stages:
         print("\n[오디오] 추출")
-        extract_audio(mp4_path)
+        extract_audio(media_path)
 
     # 2. STT 트랜스크립션
     if run_all or "stt" in stages:
@@ -888,6 +891,20 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
         else:
             print(f"\n[STT] 건너뜀 — 오디오 파일 없음 ({video_name}.mp3)")
 
+        # STT 직후 도메인 감지 (auto 모드 + 강제 도메인이 없을 때)
+        if raw_segments and forced_domain_id is None and DOMAIN_DETECTION == "auto":
+            try:
+                detected_match = detect_domain(
+                    raw_segments, openai_client,
+                    cache_dir=OUTPUT_DIR, video_stem=video_name,
+                    stt_provider=STT_PROVIDER,
+                )
+                print(f"  [도메인 감지] {detected_match.domain_id}"
+                      f" (신뢰도: {detected_match.confidence:.3f})")
+            except Exception as e:
+                print(f"  [도메인 감지 실패] {e}")
+                detected_match = None
+
     # 3. GPT 교정
     if run_all or "correct" in stages:
         # raw transcript 캐시에서 로드 (stt 단계를 건너뛴 경우)
@@ -895,20 +912,30 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
             cp = cache_path_for(video_name, "raw_transcript")
             if cp.exists():
                 raw_segments = json.loads(cp.read_text(encoding="utf-8"))
+            else:
+                latest_cp = latest_cache_path_for(video_name, "raw_transcript")
+                if latest_cp:
+                    print(f"  [캐시] 원본 STT: {latest_cp.name}")
+                    raw_segments = json.loads(latest_cp.read_text(encoding="utf-8"))
         if raw_segments:
-            # 도메인 감지
-            if DOMAIN_DETECTION == "auto":
+            # 도메인 결정: forced > 사전 감지 결과 > DOMAIN_DETECTION 정책
+            if forced_domain_id:
+                _sys, _usr = _load_domain_prompts(forced_domain_id)
+                domain = DomainMatch(forced_domain_id, 1.0, _sys, _usr, [])
+            elif detected_match is not None:
+                domain = detected_match
+            elif DOMAIN_DETECTION == "auto":
                 domain = detect_domain(
                     raw_segments, openai_client,
                     cache_dir=OUTPUT_DIR, video_stem=video_name,
                     stt_provider=STT_PROVIDER,
                 )
             elif DOMAIN_DETECTION == "generic":
-                domain = DomainMatch("generic", 0.0, *_load_domain_prompts("generic"))
+                _sys, _usr = _load_domain_prompts("generic")
+                domain = DomainMatch("generic", 0.0, _sys, _usr, [])
             else:
-                domain = DomainMatch(
-                    DOMAIN_DETECTION, 1.0, *_load_domain_prompts(DOMAIN_DETECTION)
-                )
+                _sys, _usr = _load_domain_prompts(DOMAIN_DETECTION)
+                domain = DomainMatch(DOMAIN_DETECTION, 1.0, _sys, _usr, [])
             print(f"\n[교정] {CORRECTION_MODEL} 교정 | 도메인: {domain.domain_id}"
                   f" (신뢰도: {domain.confidence:.3f})")
             corrected_segments = correct_transcript_parallel(
@@ -941,11 +968,22 @@ def process_single_video(mp4_path: Path, stages: set[str] | None = None) -> dict
     print(f"\n완료: {video_name} ({elapsed/60:.1f}분 소요)")
 
     return {
-        "video": mp4_path.name,
+        "video": media_path.name,
         "raw_segments": raw_segments,
         "corrected_segments": corrected_segments,
         "summary": summary,
         "processing_time": elapsed,
+        "detected_domain": (
+            {
+                "domain_id": detected_match.domain_id,
+                "confidence": detected_match.confidence,
+                "candidates": [
+                    {"domain_id": d, "score": s} for d, s in detected_match.candidates
+                ],
+            }
+            if detected_match is not None
+            else None
+        ),
     }
 
 
@@ -979,24 +1017,25 @@ def main():
         print(f"  실행 단계: {', '.join(sorted(stages))}")
     print("=" * 70)
 
-    valid_files = [f for f in MP4_FILES if f.exists()]
+    valid_files = [f for f in MEDIA_FILES if f.exists()]
     if not valid_files:
-        print("처리할 MP4 파일이 없습니다.")
+        print("처리할 MP4/MP3 파일이 없습니다. (downloads/ 디렉토리 확인)")
         sys.exit(1)
 
     print(f"\n처리 대상: {len(valid_files)}개 파일")
     for f in valid_files:
         size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"  - {f.name} ({size_mb:.0f}MB)")
+        kind = "MP3" if f.suffix.lower() == ".mp3" else "MP4"
+        print(f"  - [{kind}] {f.name} ({size_mb:.0f}MB)")
 
     parallel = args.parallel
     if parallel > 1:
-        print(f"\n병렬 처리: {parallel}개 영상 동시 진행")
+        print(f"\n병렬 처리: {parallel}개 파일 동시 진행")
         results_map = {}
         with ThreadPoolExecutor(max_workers=parallel) as executor:
             futures = {
-                executor.submit(process_single_video, mp4, stages): i
-                for i, mp4 in enumerate(valid_files)
+                executor.submit(process_single_video, media, stages): i
+                for i, media in enumerate(valid_files)
             }
             for future in as_completed(futures):
                 idx = futures[future]
@@ -1012,8 +1051,8 @@ def main():
         results = [results_map[i] for i in range(len(valid_files))]
     else:
         results = []
-        for mp4_path in valid_files:
-            result = process_single_video(mp4_path, stages)
+        for media_path in valid_files:
+            result = process_single_video(media_path, stages)
             results.append(result)
 
     # 통합 결과 JSON

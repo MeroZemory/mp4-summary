@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+import { DomainPicker } from './components/DomainPicker'
+import { HybridShell, type ShellNavKey } from './components/HybridShell'
+import {
+  groupLecturesByDomain,
+  postLectureDomain,
+  type DomainInfo,
+  type Lecture,
+} from './hooks/useLectures'
 
 // ─── Types ──────────────────────────────────────────────
 
@@ -20,6 +29,11 @@ type LectureSummary = {
   version: number
   generated_at: string
   video: string
+  models?: {
+    correction?: string
+    gpt_summary?: string
+    claude_summary?: string
+  }
   overview: {
     title: string
     summary: string
@@ -205,7 +219,8 @@ function CheckIcon() {
   )
 }
 
-function MenuIcon() {
+// 모바일 햄버거 — 디자인 3/3 단계에서 메인 영역 메타바로 옮겨질 예정
+export function MenuIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
@@ -413,12 +428,13 @@ declare global {
   }
 }
 
-type ShowMeModel = 'gpt' | 'claude'
-
 type ShowMeBlock =
   | { type: 'markdown'; content: string }
   | { type: 'mermaid'; code: string }
+  | { type: 'svg'; code: string }
   | { type: 'csv'; data: string[][] }
+
+const DIAGRAM_LANGS = ['mermaid', 'svg', 'csv'] as const
 
 function parseShowMeContent(raw: string): ShowMeBlock[] {
   const blocks: ShowMeBlock[] = []
@@ -442,6 +458,8 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
 
       if (lang === 'mermaid') {
         blocks.push({ type: 'mermaid', code: codeLines.join('\n') })
+      } else if (lang === 'svg') {
+        blocks.push({ type: 'svg', code: codeLines.join('\n') })
       } else if (lang === 'csv') {
         const data = codeLines
           .filter((l) => l.trim())
@@ -455,7 +473,8 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
       const mdLines: string[] = []
       while (i < lines.length) {
         const t = lines[i].trimStart()
-        if (t.match(/^```(\w+)/) && ['mermaid', 'csv'].includes(t.match(/^```(\w+)/)![1].toLowerCase())) break
+        const m = t.match(/^```(\w+)/)
+        if (m && (DIAGRAM_LANGS as readonly string[]).includes(m[1].toLowerCase())) break
         mdLines.push(lines[i])
         i++
       }
@@ -465,6 +484,93 @@ function parseShowMeContent(raw: string): ShowMeBlock[] {
   }
 
   return blocks
+}
+
+// LLM 이 생성한 SVG/HTML 단편을 기본 sanitize: <script>, on* 핸들러, javascript: URI 제거
+function sanitizeSvg(raw: string): string {
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<script[^>]*\/?\s*>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:xlink:href|href|src)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '')
+}
+
+// LLM 응답이 HTML 단편 형태인지 판별. 옛 baseline (마크다운 + ```svg``` 코드 블록) 과 자동 분기.
+function isHtmlFragment(raw: string): boolean {
+  return /^\s*</.test(raw)
+}
+
+// LLM 이 생성한 HTML 단편은 <style> 블록이 페이지 전역에 영향을 미치므로
+// iframe sandbox 안에 격리한다. allow-scripts 는 빼고 same-origin 만 허용.
+function HtmlFragment({ html }: { html: string }) {
+  const safe = useMemo(() => sanitizeSvg(html), [html])
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [height, setHeight] = useState(360)
+
+  const srcDoc = useMemo(
+    () =>
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank">` +
+      `<style>` +
+      // overflow:hidden — 부모 reader 가 스크롤을 담당하므로 iframe 자체엔 scrollbar 가 절대 안 생기게.
+      `html,body{margin:0;padding:0;background:#ffffff;overflow:hidden;` +
+      `font-family:-apple-system,'Segoe UI','Noto Sans KR','Pretendard',sans-serif;` +
+      `color:#1c1917;font-feature-settings:"ss01","cv11";letter-spacing:-0.005em;}` +
+      `body{padding:20px;}` +
+      `svg{max-width:100%;height:auto;display:block;margin:0 auto;}` +
+      `*{box-sizing:border-box;}` +
+      `</style></head><body>${safe}</body></html>`,
+    [safe],
+  )
+
+  // 콘텐츠 변경/폰트 로드 후 정확한 높이로 자동 리사이즈
+  useEffect(() => {
+    const iframe = iframeRef.current
+    if (!iframe) return
+    let cancelled = false
+    const measure = () => {
+      if (cancelled) return
+      try {
+        const doc = iframe.contentDocument
+        if (!doc) return
+        const h = Math.max(
+          doc.documentElement.scrollHeight,
+          doc.body.scrollHeight,
+        )
+        if (h && Math.abs(h - height) > 2) setHeight(h)
+      } catch {
+        /* sandbox 접근 차단 시 무시 */
+      }
+    }
+    const onLoad = () => {
+      measure()
+      // 폰트 / 이미지 로드 후 재측정
+      window.setTimeout(measure, 80)
+      window.setTimeout(measure, 320)
+    }
+    iframe.addEventListener('load', onLoad)
+    return () => {
+      cancelled = true
+      iframe.removeEventListener('load', onLoad)
+    }
+  }, [srcDoc, height])
+
+  return (
+    <iframe
+      ref={iframeRef}
+      srcDoc={srcDoc}
+      sandbox="allow-same-origin"
+      title="강의 시각화"
+      style={{
+        width: '100%',
+        height,
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        background: 'var(--surface)',
+        display: 'block',
+        margin: '16px 0',
+      }}
+    />
+  )
 }
 
 function CsvTable({ data }: { data: string[][] }) {
@@ -650,6 +756,51 @@ function MermaidDiagram({ code }: { code: string }) {
   )
 }
 
+function SvgDiagram({ code }: { code: string }) {
+  const safeSvg = useMemo(() => sanitizeSvg(code), [code])
+  const [fullscreen, setFullscreen] = useState(false)
+
+  const MAX_ASPECT = 1.8
+  const displayStyle = useMemo(() => {
+    const match = safeSvg.match(/viewBox="[\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"/)
+    if (!match) return { width: '100%', maxWidth: '100%' } as const
+    const vbW = parseFloat(match[1])
+    const vbH = parseFloat(match[2])
+    if (!vbW || !vbH) return { width: '100%', maxWidth: '100%' } as const
+    const aspect = vbH / vbW
+    if (aspect <= MAX_ASPECT) return { width: '100%', maxWidth: '100%' } as const
+    const pct = Math.max(30, Math.round((MAX_ASPECT / aspect) * 100))
+    return { width: `${pct}%`, maxWidth: `${pct}%`, margin: '0 auto' } as const
+  }, [safeSvg])
+
+  if (!safeSvg.includes('<svg')) {
+    return (
+      <div className="my-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+        <p className="text-[12px] text-amber-600 font-medium mb-2">SVG 다이어그램 파싱 실패</p>
+        <pre className="text-[12px] font-mono text-slate-600 whitespace-pre-wrap bg-white rounded-lg p-3 border border-slate-200">{code}</pre>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="my-4 relative group rounded-xl border border-slate-200 bg-white p-4 overflow-x-auto mermaid-wide">
+        <div style={displayStyle} dangerouslySetInnerHTML={{ __html: safeSvg }} />
+        <button
+          onClick={() => setFullscreen(true)}
+          className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-white/80 border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-white shadow-sm opacity-0 group-hover:opacity-100 transition-all"
+          title="전체 화면으로 보기"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+          </svg>
+        </button>
+      </div>
+      {fullscreen && <DiagramModal svg={safeSvg} onClose={() => setFullscreen(false)} />}
+    </>
+  )
+}
+
 function DiagramModal({ svg, onClose }: { svg: string; onClose: () => void }) {
   const [scale, setScale] = useState(1)
   const [pos, setPos] = useState({ x: 0, y: 0 })
@@ -718,63 +869,395 @@ function DiagramModal({ svg, onClose }: { svg: string; onClose: () => void }) {
   )
 }
 
-function ShowMe({
-  showMeGpt,
-  showMeClaude,
+// ─── Module versioning (ShowMe / Notes 재생성) ─────────────
+
+type ModuleName = 'show_me' | 'notes'
+type ModelKindName = 'gpt' | 'claude'
+
+type VersionMeta = {
+  version: number
+  model_id: string
+  created_at: string
+  is_baseline: boolean
+  job_id: string | null
+}
+
+type VersionsResponse = {
+  show_me: { gpt: VersionMeta[]; claude: VersionMeta[] }
+  notes: { gpt: VersionMeta[]; claude: VersionMeta[] }
+}
+
+// ─── Global Regen store ─────────────────────────────────
+// 강의 × (module, model_kind) 슬롯 단위 polling. 컴포넌트 unmount 또는
+// 모델 토글 변경에도 진행 중인 재생성 작업을 잃지 않는다.
+
+type RegenKey = string  // `${lectureId}|${module}|${modelKind}`
+
+function regenKeyOf(lectureId: string, module: ModuleName, modelKind: ModelKindName): RegenKey {
+  return `${lectureId}|${module}|${modelKind}`
+}
+
+type ActiveRegen = { lectureId: string; module: ModuleName; modelKind: ModelKindName; jobId: string }
+
+type RegenContextValue = {
+  active: ReadonlyMap<RegenKey, ActiveRegen>
+  errors: ReadonlyMap<RegenKey, string>
+  // 슬롯이 완료될 때마다 카운터 증가 → 컴포넌트가 versions refetch 트리거로 사용
+  completionCounters: ReadonlyMap<RegenKey, number>
+  start: (lectureId: string, module: ModuleName, modelKind: ModelKindName) => Promise<void>
+  clearError: (lectureId: string, module: ModuleName, modelKind: ModelKindName) => void
+}
+
+const RegenContext = createContext<RegenContextValue | null>(null)
+
+export function RegenProvider({ children }: { children: ReactNode }) {
+  const [active, setActive] = useState<Map<RegenKey, ActiveRegen>>(() => new Map())
+  const [errors, setErrors] = useState<Map<RegenKey, string>>(() => new Map())
+  const [completionCounters, setCompletionCounters] = useState<Map<RegenKey, number>>(() => new Map())
+
+  // 마운트 시 backend 에서 진행 중인 regen jobs 를 시드 — 새로고침 후 polling 재개
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/regen/active')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: { job_id: string; lecture_id: string; module: ModuleName; model_kind: ModelKindName }[]) => {
+        if (cancelled || list.length === 0) return
+        setActive((prev) => {
+          const next = new Map(prev)
+          for (const item of list) {
+            const key = regenKeyOf(item.lecture_id, item.module, item.model_kind)
+            // 이미 추적 중이면 덮어쓰지 않음 (start() 가 set 한 게 우선)
+            if (!next.has(key)) {
+              next.set(key, {
+                lectureId: item.lecture_id,
+                module: item.module,
+                modelKind: item.model_kind,
+                jobId: item.job_id,
+              })
+            }
+          }
+          return next
+        })
+      })
+      .catch(() => { /* 인증 미완료 등 — 무시 */ })
+    return () => { cancelled = true }
+  }, [])
+
+  // active 가 하나라도 있으면 단일 polling interval 로 모두 확인
+  useEffect(() => {
+    if (active.size === 0) return
+    let cancelled = false
+    const tick = async () => {
+      const snapshot = Array.from(active.entries())
+      for (const [key, regen] of snapshot) {
+        try {
+          const res = await fetch(`/api/jobs/${regen.jobId}`)
+          if (!res.ok) continue
+          const j: { status: string; error_message: string | null } = await res.json()
+          if (cancelled) return
+          if (j.status === 'completed') {
+            setActive((prev) => {
+              if (!prev.has(key)) return prev
+              const next = new Map(prev); next.delete(key); return next
+            })
+            setCompletionCounters((prev) => {
+              const next = new Map(prev); next.set(key, (prev.get(key) ?? 0) + 1); return next
+            })
+            setErrors((prev) => {
+              if (!prev.has(key)) return prev
+              const next = new Map(prev); next.delete(key); return next
+            })
+          } else if (j.status === 'failed' || j.status === 'canceled') {
+            setActive((prev) => {
+              if (!prev.has(key)) return prev
+              const next = new Map(prev); next.delete(key); return next
+            })
+            setErrors((prev) => {
+              const next = new Map(prev)
+              next.set(key, j.error_message || `재생성 ${j.status}`)
+              return next
+            })
+          }
+        } catch {
+          // 네트워크 일시 오류 — 다음 tick 에 재시도
+        }
+      }
+    }
+    const interval = window.setInterval(tick, 2000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [active])
+
+  const start = useCallback(async (lectureId: string, module: ModuleName, modelKind: ModelKindName) => {
+    const key = regenKeyOf(lectureId, module, modelKind)
+    setErrors((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Map(prev); next.delete(key); return next
+    })
+    try {
+      const res = await fetch(`/api/lectures/${encodeURIComponent(lectureId)}/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module, model_kind: modelKind }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { detail?: string }
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const data: { job_id: string } = await res.json()
+      setActive((prev) => {
+        const next = new Map(prev)
+        next.set(key, { lectureId, module, modelKind, jobId: data.job_id })
+        return next
+      })
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e)
+      setErrors((prev) => {
+        const next = new Map(prev); next.set(key, message); return next
+      })
+    }
+  }, [])
+
+  const clearError = useCallback((lectureId: string, module: ModuleName, modelKind: ModelKindName) => {
+    const key = regenKeyOf(lectureId, module, modelKind)
+    setErrors((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Map(prev); next.delete(key); return next
+    })
+  }, [])
+
+  const value = useMemo(
+    () => ({ active, errors, completionCounters, start, clearError }),
+    [active, errors, completionCounters, start, clearError],
+  )
+  return <RegenContext.Provider value={value}>{children}</RegenContext.Provider>
+}
+
+function useRegen(): RegenContextValue {
+  const ctx = useContext(RegenContext)
+  if (!ctx) throw new Error('useRegen must be used inside <RegenProvider>')
+  return ctx
+}
+
+// ─── Slot hook (글로벌 store 위에서 동작) ──────────────
+
+type SlotLocalState = {
+  versions: VersionMeta[]
+  selectedVersion: number | null
+  content: string
+  isLoading: boolean
+}
+
+function useModuleVersions(
+  lectureId: string,
+  module: ModuleName,
+  modelKind: ModelKindName,
+  fallbackContent: string,
+) {
+  const ctx = useRegen()
+  const key = regenKeyOf(lectureId, module, modelKind)
+  const isRegenerating = ctx.active.has(key)
+  const regenError = ctx.errors.get(key) ?? null
+  const completionCounter = ctx.completionCounters.get(key) ?? 0
+
+  const [state, setState] = useState<SlotLocalState>({
+    versions: [],
+    selectedVersion: null,
+    content: fallbackContent,
+    isLoading: false,
+  })
+
+  // versions 메타 fetch — 슬롯 식별자나 완료 카운터가 바뀌면 재조회 (재생성 직후 새 v 가 노출되도록)
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/lectures/${encodeURIComponent(lectureId)}/versions`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: VersionsResponse) => {
+        if (cancelled) return
+        const slot = data[module][modelKind] ?? []
+        const latest = slot.length > 0 ? slot[0].version : null
+        setState((s) => ({
+          ...s,
+          versions: slot,
+          selectedVersion: latest,
+          content: latest === null ? fallbackContent : s.content,
+        }))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setState((s) => ({ ...s, versions: [], selectedVersion: null, content: fallbackContent }))
+      })
+    return () => { cancelled = true }
+  }, [lectureId, module, modelKind, fallbackContent, completionCounter])
+
+  // 선택 버전 콘텐츠 fetch
+  useEffect(() => {
+    if (state.selectedVersion === null) return
+    let cancelled = false
+    setState((s) => ({ ...s, isLoading: true }))
+    fetch(
+      `/api/lectures/${encodeURIComponent(lectureId)}/versions/${module}/${modelKind}/${state.selectedVersion}`,
+    )
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: { content: string }) => {
+        if (cancelled) return
+        setState((s) => ({ ...s, content: data.content, isLoading: false }))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setState((s) => ({ ...s, isLoading: false }))
+      })
+    return () => { cancelled = true }
+  }, [lectureId, module, modelKind, state.selectedVersion])
+
+  const triggerRegen = useCallback(async (): Promise<void> => {
+    await ctx.start(lectureId, module, modelKind)
+  }, [ctx, lectureId, module, modelKind])
+
+  const setSelectedVersion = useCallback((v: number | null) => {
+    setState((s) => ({ ...s, selectedVersion: v }))
+  }, [])
+
+  const dismissError = useCallback(() => {
+    ctx.clearError(lectureId, module, modelKind)
+  }, [ctx, lectureId, module, modelKind])
+
+  return {
+    versions: state.versions,
+    selectedVersion: state.selectedVersion,
+    content: state.content,
+    isLoading: state.isLoading,
+    isRegenerating,
+    regenError,
+    triggerRegen,
+    setSelectedVersion,
+    dismissError,
+  }
+}
+
+function VersionDropdown({
+  versions, selectedVersion, onSelect, disabled,
 }: {
-  showMeGpt: string
-  showMeClaude: string
+  versions: VersionMeta[]
+  selectedVersion: number | null
+  onSelect: (v: number) => void
+  disabled?: boolean
 }) {
-  const hasGpt = showMeGpt.length > 0
-  const hasClaude = showMeClaude.length > 0
+  if (versions.length === 0) return null
+  return (
+    <select
+      disabled={disabled}
+      value={selectedVersion ?? versions[0].version}
+      onChange={(e) => onSelect(parseInt(e.target.value, 10))}
+      className="text-[11px] font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md px-2 py-1 border-0 focus:ring-1 focus:ring-teal-400 disabled:opacity-50"
+      title="버전 선택"
+    >
+      {versions.map((v) => (
+        <option key={v.version} value={v.version}>
+          v{v.version}{v.is_baseline ? ' (기준)' : ''} · {v.model_id}
+        </option>
+      ))}
+    </select>
+  )
+}
 
-  const defaultModel: ShowMeModel = hasClaude ? 'claude' : 'gpt'
-  const [model, setModel] = useState<ShowMeModel>(defaultModel)
+function RegenButton({
+  isRegenerating, onTrigger,
+}: {
+  isRegenerating: boolean
+  onTrigger: () => Promise<void>
+}) {
+  return (
+    <button
+      onClick={() => { void onTrigger() }}
+      disabled={isRegenerating}
+      className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition flex items-center gap-1.5 ${
+        isRegenerating
+          ? 'bg-amber-100 text-amber-700 cursor-wait'
+          : 'bg-teal-50 text-teal-700 hover:bg-teal-100'
+      }`}
+      title="현재 토글된 모델로 새 버전 생성"
+    >
+      {isRegenerating ? (
+        <>
+          <span className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+          <span>재생성 중…</span>
+        </>
+      ) : (
+        <>
+          <span>↻</span>
+          <span>재생성</span>
+        </>
+      )}
+    </button>
+  )
+}
 
-  const content = model === 'claude' ? showMeClaude : showMeGpt
-  const blocks = useMemo(() => parseShowMeContent(content), [content])
+function ShowMe({
+  lectureId,
+  showMeClaude,
+  models,
+}: {
+  lectureId: string
+  // GPT 변형은 임시 중단되어 props 에서 제거 — Claude (Opus) 단독.
+  showMeClaude: string
+  models?: LectureSummary['models']
+}) {
+  const slot = useModuleVersions(lectureId, 'show_me', 'claude', showMeClaude)
 
-  const hasBothModels = hasGpt && hasClaude
+  const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
+  const activeModelId = currentMeta?.model_id ?? models?.claude_summary
+  const isHtml = useMemo(() => isHtmlFragment(slot.content), [slot.content])
+  const blocks = useMemo(
+    () => (isHtml ? [] : parseShowMeContent(slot.content)),
+    [isHtml, slot.content],
+  )
+  const renderKey = `${slot.selectedVersion ?? 'fb'}`
 
   return (
     <div className="px-5 py-4">
-      {/* Header row with model toggle */}
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[15px] font-semibold text-slate-800">강의 시각화</h3>
+      {/* Header row with version dropdown + regen button */}
+      <div className="flex items-center justify-between mb-3 gap-3">
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold text-slate-800">시각화</h3>
+          {activeModelId && (
+            <p className="mt-0.5 text-[11px] text-slate-400">
+              {activeModelId}
+              {currentMeta?.is_baseline && <span className="ml-1 text-amber-500">기준</span>}
+            </p>
+          )}
+        </div>
 
-        {hasBothModels && (
-          <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-            <button
-              onClick={() => setModel('gpt')}
-              className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
-                model === 'gpt'
-                  ? 'bg-white text-emerald-700 shadow-sm'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              GPT-5.4
-            </button>
-            <button
-              onClick={() => setModel('claude')}
-              className={`px-3 py-1 rounded-md text-[12px] font-medium transition-all ${
-                model === 'claude'
-                  ? 'bg-white text-violet-700 shadow-sm'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              Claude Opus
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          <VersionDropdown
+            versions={slot.versions}
+            selectedVersion={slot.selectedVersion}
+            onSelect={slot.setSelectedVersion}
+          />
+
+          <RegenButton
+            isRegenerating={slot.isRegenerating}
+            onTrigger={slot.triggerRegen}
+          />
+        </div>
       </div>
 
-      {/* Rendered blocks */}
-      <div>
-        {blocks.map((block, i) => {
-          if (block.type === 'mermaid') return <MermaidDiagram key={`${model}-${i}`} code={block.code} />
-          if (block.type === 'csv') return <CsvTable key={`${model}-${i}`} data={block.data} />
-          return <MarkdownContent key={`${model}-${i}`} content={block.content} />
-        })}
+      {slot.regenError && (
+        <div className="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[12px] text-red-700">
+          재생성 실패: {slot.regenError}
+        </div>
+      )}
+
+      <div className={slot.isLoading ? 'opacity-60 transition-opacity' : ''}>
+        {isHtml ? (
+          <HtmlFragment key={renderKey} html={slot.content} />
+        ) : (
+          blocks.map((block, i) => {
+            if (block.type === 'svg') return <SvgDiagram key={`${renderKey}-${i}`} code={block.code} />
+            if (block.type === 'mermaid') return <MermaidDiagram key={`${renderKey}-${i}`} code={block.code} />
+            if (block.type === 'csv') return <CsvTable key={`${renderKey}-${i}`} data={block.data} />
+            return <MarkdownContent key={`${renderKey}-${i}`} content={block.content} />
+          })
+        )}
       </div>
     </div>
   )
@@ -884,11 +1367,13 @@ function StudyGuide({
 }
 
 function SummaryPanel({
+  lectureId,
   summary,
   onTimestampClick,
   collapsed,
   onToggleCollapse,
 }: {
+  lectureId: string
   summary: LectureSummary
   onTimestampClick: (time: string) => void
   collapsed: boolean
@@ -910,28 +1395,44 @@ function SummaryPanel({
 
       {!collapsed && (
         <div>
-          {/* Overview or ShowMe */}
-          <div className="border-t border-slate-100">
-            {(summary.show_me_gpt || summary.show_me_claude) ? (
-              <ShowMe
-                showMeGpt={summary.show_me_gpt ?? ''}
-                showMeClaude={summary.show_me_claude ?? ''}
-              />
-            ) : (
+          {/* Overview — 항상 표시 (짧은 텍스트 요약) */}
+          {(summary.overview.title || summary.overview.summary) && (
+            <div id="section-overview" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100">
               <OverviewCard overview={summary.overview} />
-            )}
-          </div>
+            </div>
+          )}
 
-          {/* Two-column grid: Key Concepts + Timeline */}
-          <div className="border-t border-slate-100 px-5 py-4 grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <KeyConceptsList concepts={summary.key_concepts} onTimestampClick={onTimestampClick} />
-            <TimelineList timeline={summary.timeline} onTimestampClick={onTimestampClick} />
-          </div>
+          {/* Key Concepts — anchor: section-concepts (single column) */}
+          {summary.key_concepts.length > 0 && (
+            <div id="section-concepts" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
+              <KeyConceptsList concepts={summary.key_concepts} onTimestampClick={onTimestampClick} />
+            </div>
+          )}
 
-          {/* Study Guide */}
-          <div className="border-t border-slate-100 px-5 py-4">
-            <StudyGuide items={summary.study_guide} onTimestampClick={onTimestampClick} />
-          </div>
+          {/* Timeline — anchor: section-timeline (single column, 별도 섹션) */}
+          {summary.timeline.length > 0 && (
+            <div id="section-timeline" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
+              <TimelineList timeline={summary.timeline} onTimestampClick={onTimestampClick} />
+            </div>
+          )}
+
+          {/* ShowMe — anchor: section-showme. HTML+SVG 시각화 (있을 때만) */}
+          {(summary.show_me_gpt || summary.show_me_claude) && (
+            <div id="section-showme" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100">
+              <ShowMe
+                lectureId={lectureId}
+                showMeClaude={summary.show_me_claude ?? ''}
+                models={summary.models}
+              />
+            </div>
+          )}
+
+          {/* Study Guide — anchor: section-qa */}
+          {summary.study_guide.length > 0 && (
+            <div id="section-qa" style={{ scrollMarginTop: 50 }} className="border-t border-slate-100 px-5 py-4">
+              <StudyGuide items={summary.study_guide} onTimestampClick={onTimestampClick} />
+            </div>
+          )}
 
         </div>
       )}
@@ -939,47 +1440,67 @@ function SummaryPanel({
   )
 }
 
-function NotesSection({ notesGpt, notesClaude }: { notesGpt: string; notesClaude: string }) {
-  const hasGpt = notesGpt.length > 0
-  const hasClaude = notesClaude.length > 0
-  const [model, setModel] = useState<'gpt' | 'claude'>(hasClaude ? 'claude' : 'gpt')
-  const [expanded, setExpanded] = useState(false)
-  const content = model === 'claude' ? notesClaude : notesGpt
+function NotesSection({
+  lectureId, notesClaude, models,
+  expanded: expandedProp,
+  onToggle,
+}: {
+  lectureId: string
+  // GPT 변형은 임시 중단 — Claude (Opus) 단독.
+  notesClaude: string
+  models?: LectureSummary['models']
+  // controlled expand — TOC 자동 expand 를 위해 부모가 owner.
+  // prop 미지정 시 내부 state 로 fallback (기존 동작 유지).
+  expanded?: boolean
+  onToggle?: () => void
+}) {
+  const [internalExpanded, setInternalExpanded] = useState(false)
+  const expanded = expandedProp !== undefined ? expandedProp : internalExpanded
+  const setExpanded = onToggle ?? (() => setInternalExpanded((v) => !v))
+  const slot = useModuleVersions(lectureId, 'notes', 'claude', notesClaude)
+  const currentMeta = slot.versions.find((v) => v.version === slot.selectedVersion)
+  const activeModelId = currentMeta?.model_id ?? models?.claude_summary
 
   return (
     <div className="px-5 py-4">
-      <div className="flex items-center justify-between mb-3">
-        <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-2 text-left">
+      <div className="flex items-center justify-between mb-3 gap-3">
+        <button onClick={() => setExpanded()} className="flex items-center gap-2 text-left min-w-0">
           <ChevronDownIcon className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`} />
           <h3 className="text-[14px] font-semibold text-slate-800">강의 정리</h3>
-          <span className="text-[11px] text-slate-400">강의를 대체할 수 있는 포괄적 노트</span>
+          <span className="text-[11px] text-slate-400 hidden sm:inline">강의를 대체할 수 있는 포괄적 노트</span>
+          {activeModelId && (
+            <span className="text-[11px] text-slate-400">
+              {activeModelId}
+              {currentMeta?.is_baseline && <span className="ml-1 text-amber-500">기준</span>}
+            </span>
+          )}
         </button>
 
-        {hasGpt && hasClaude && expanded && (
-          <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-            <button
-              onClick={() => setModel('gpt')}
-              className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
-                model === 'gpt' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              GPT-5.4
-            </button>
-            <button
-              onClick={() => setModel('claude')}
-              className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition-all ${
-                model === 'claude' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              Claude Opus
-            </button>
+        {expanded && (
+          <div className="flex items-center gap-2 shrink-0">
+            <VersionDropdown
+              versions={slot.versions}
+              selectedVersion={slot.selectedVersion}
+              onSelect={slot.setSelectedVersion}
+            />
+
+            <RegenButton
+              isRegenerating={slot.isRegenerating}
+              onTrigger={slot.triggerRegen}
+            />
           </div>
         )}
       </div>
 
+      {slot.regenError && (
+        <div className="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[12px] text-red-700">
+          재생성 실패: {slot.regenError}
+        </div>
+      )}
+
       {expanded && (
-        <div className="rounded-xl border border-slate-200 bg-white p-5">
-          <MarkdownContent content={content} />
+        <div className={`rounded-xl border border-slate-200 bg-white p-5 ${slot.isLoading ? 'opacity-60' : ''}`}>
+          <MarkdownContent content={slot.content} />
         </div>
       )}
     </div>
@@ -2517,9 +3038,242 @@ function InsightsPanel({
   )
 }
 
+// ─── Lecture Domain Badge (강의 페이지 헤더) ─────────────
+
+interface LectureDomainBadgeProps {
+  lecture: Lecture | null
+  domains: DomainInfo[]
+  onConfirm: (domainId: string) => Promise<void>
+}
+
+function LectureDomainBadge({ lecture, domains, onConfirm }: LectureDomainBadgeProps) {
+  const [editing, setEditing] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  if (!lecture) return null
+
+  const labelOf = (id: string | null | undefined) => {
+    if (!id) return '미분류'
+    return domains.find((d) => d.id === id)?.name || id
+  }
+
+  const isPending = lecture.domain_status === 'pending'
+  const isAwaiting = lecture.latest_job_status === 'awaiting_domain'
+  const isMigrated = lecture.domain_source === 'migration'
+
+  const handleConfirm = async (domainId: string) => {
+    if (domainId === lecture.domain_id && !isPending && !isAwaiting) {
+      setEditing(false)
+      return
+    }
+    if (
+      lecture.domain_id &&
+      domainId !== lecture.domain_id &&
+      !confirm(
+        '도메인을 바꾸면 코렉션과 요약이 다시 생성됩니다. 진행하시겠습니까?',
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    try {
+      await onConfirm(domainId)
+      setEditing(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (isMigrated) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium bg-slate-50 text-slate-500 border-slate-200"
+        title="마이그레이션된 강의는 도메인 변경(재코렉션)을 지원하지 않습니다"
+      >
+        <span>🏷</span>
+        <span>{labelOf(lecture.domain_id)}</span>
+        <span className="text-slate-300 text-[10px]">migrated</span>
+      </span>
+    )
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setEditing((v) => !v)}
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium transition ${
+          isPending
+            ? 'bg-amber-50 text-amber-700 border-amber-200 hover:border-amber-300'
+            : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300'
+        }`}
+        title="도메인 변경"
+      >
+        <span>🏷</span>
+        <span>{labelOf(lecture.domain_id)}</span>
+        <span className="text-slate-400">▾</span>
+      </button>
+      {editing && (
+        <div className="absolute z-30 mt-2 left-0 min-w-[260px]">
+          <DomainPicker
+            domains={domains}
+            recommendedId={lecture.detected_domain_id}
+            recommendedConfidence={lecture.detected_confidence}
+            topCandidates={lecture.detected_top_candidates}
+            currentDomainId={lecture.domain_id}
+            busy={busy}
+            onConfirm={handleConfirm}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Lecture Groups (sidebar section) ──────────────────
+
+type LectureGroupView = ReturnType<typeof groupLecturesByDomain>[number]
+
+interface LectureGroupsProps {
+  groups: LectureGroupView[]
+  entries: TranscriptEntry[]
+  search: string
+  selectedId: string
+  collapsedGroups: Set<string>
+  onToggleGroup: (key: string) => void
+  onSelect: (id: string) => void
+}
+
+// TODO(design 3/3): HybridShell 의 lecture tree 가 대체. 다음 단계에서 제거.
+export function LectureGroups({
+  groups,
+  entries,
+  search,
+  selectedId,
+  collapsedGroups,
+  onToggleGroup,
+  onSelect,
+}: LectureGroupsProps) {
+  const entryById = useMemo(() => {
+    const m = new Map<string, TranscriptEntry>()
+    for (const e of entries) m.set(e.id, e)
+    return m
+  }, [entries])
+
+  const q = search.trim().toLowerCase()
+
+  const filteredGroups = useMemo(() => {
+    if (!q) return groups
+    return groups
+      .map((g) => ({
+        ...g,
+        lectures: g.lectures.filter((l) => {
+          const label = (entryById.get(l.id)?.label ?? l.original_name).toLowerCase()
+          return label.includes(q) || l.original_name.toLowerCase().includes(q)
+        }),
+      }))
+      .filter((g) => g.lectures.length > 0)
+  }, [groups, q, entryById])
+
+  if (filteredGroups.length === 0) {
+    return (
+      <div className="px-4 py-8 text-center text-sm text-slate-400">
+        {q ? `"${search}" 결과 없음` : '아직 등록된 강의가 없습니다'}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {filteredGroups.map((group) => {
+        const isCollapsed = collapsedGroups.has(group.key)
+        return (
+          <div key={group.key}>
+            <button
+              type="button"
+              onClick={() => onToggleGroup(group.key)}
+              className={`w-full flex items-center justify-between px-2 py-1 rounded text-[11px] font-semibold uppercase tracking-wider transition ${
+                group.isPending
+                  ? 'text-amber-700 hover:bg-amber-50'
+                  : group.isGeneric
+                  ? 'text-slate-500 hover:bg-slate-50'
+                  : 'text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="text-slate-400">{isCollapsed ? '▸' : '▾'}</span>
+                <span>{group.label}</span>
+                <span className="text-slate-400 font-normal">({group.lectures.length})</span>
+                {group.hasAwaitingConfirm && (
+                  <span title="컨펌 대기 중인 강의가 있습니다" className="text-amber-500">⚠</span>
+                )}
+              </span>
+            </button>
+            {!isCollapsed && (
+              <div className="mt-1 space-y-px">
+                {group.lectures.map((lec) => {
+                  const entry = entryById.get(lec.id)
+                  const label = entry?.label ?? lec.original_name.replace(/\.(mp3|mp4)$/i, '')
+                  const isActive = lec.id === selectedId
+                  const count = entry?.corrected?.segmentCount ?? entry?.raw?.segmentCount ?? 0
+                  const hasContent = !!entry
+                  const isAwaiting = lec.latest_job_status === 'awaiting_domain'
+                  const isProcessing =
+                    lec.latest_job_status === 'queued' ||
+                    lec.latest_job_status === 'processing'
+                  return (
+                    <button
+                      key={lec.id}
+                      onClick={() => onSelect(lec.id)}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-[13px] transition-all duration-100 ${
+                        isActive
+                          ? 'bg-teal-600 text-white font-medium shadow-sm shadow-teal-600/20'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
+                      }`}
+                      title={label}
+                    >
+                      <div className="truncate leading-snug">{label}</div>
+                      <div
+                        className={`flex items-center gap-2 text-[11px] mt-0.5 ${
+                          isActive ? 'text-teal-200' : 'text-slate-400'
+                        }`}
+                      >
+                        {hasContent && count > 0 && <span>{count}개 세그먼트</span>}
+                        {isAwaiting && (
+                          <span className={isActive ? 'text-amber-200' : 'text-amber-600'}>
+                            컨펌 대기
+                          </span>
+                        )}
+                        {isProcessing && (
+                          <span className={isActive ? 'text-teal-200' : 'text-slate-500'}>
+                            {lec.latest_job_type === 'stt' ? 'STT 진행 중'
+                              : lec.latest_job_type === 'correct' ? '코렉션 중'
+                              : lec.latest_job_type === 'summary' ? '요약 생성 중'
+                              : '처리 중'}
+                          </span>
+                        )}
+                        {!hasContent && !isAwaiting && !isProcessing && (
+                          <span className={isActive ? 'text-teal-200' : 'text-slate-400'}>
+                            (콘텐츠 미빌드)
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── Upload Panel (sidebar section) ─────────────────────
 
-type JobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'canceled'
+type JobStatus = 'queued' | 'processing' | 'awaiting_domain' | 'completed' | 'failed' | 'canceled'
+type JobType = 'full' | 'stt' | 'correct' | 'summary' | 'regen'
 type Job = {
   id: string
   filename: string
@@ -2528,6 +3282,8 @@ type Job = {
   lecture_id: string | null
   status: JobStatus
   stage: string | null
+  job_type: JobType
+  parent_job_id: string | null
   progress_message: string | null
   error_message: string | null
   created_at: string
@@ -2545,16 +3301,35 @@ function formatSize(bytes: number | null): string {
   return `${(mb / 1024).toFixed(1)}GB`
 }
 
-function UploadPanel() {
+interface UploadPanelProps {
+  lectures: Lecture[]
+  domains: DomainInfo[]
+  onConfirmDomain: (lectureId: string, domainId: string) => Promise<void>
+  onJobChanged: () => void
+}
+
+function UploadPanel({
+  lectures,
+  domains,
+  onConfirmDomain,
+  onJobChanged,
+}: UploadPanelProps) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [expanded, setExpanded] = useState(true)
   const [uploading, setUploading] = useState(0)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [completedSinceLoad, setCompletedSinceLoad] = useState(0)
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const knownCompletedRef = useRef<Set<string>>(new Set())
   const initialLoadRef = useRef(true)
+
+  const lectureById = useMemo(() => {
+    const m = new Map<string, Lecture>()
+    for (const l of lectures) m.set(l.id, l)
+    return m
+  }, [lectures])
 
   const loadJobs = useCallback(async () => {
     try {
@@ -2562,11 +3337,12 @@ function UploadPanel() {
       if (!res.ok) return
       const data: Job[] = await res.json()
       setJobs(data)
-      // 초기 로드의 completed는 새 완료로 카운트하지 않음
+      // 초기 로드의 completed는 새 완료로 카운트하지 않음.
+      // regen 은 업로드와 무관하므로 "새 강의 완료" 배너 카운트에서도 제외.
       const nextCompletedSet = new Set(knownCompletedRef.current)
       let newCompletions = 0
       for (const j of data) {
-        if (j.status === 'completed' && !nextCompletedSet.has(j.id)) {
+        if (j.status === 'completed' && j.job_type !== 'regen' && !nextCompletedSet.has(j.id)) {
           nextCompletedSet.add(j.id)
           if (!initialLoadRef.current) newCompletions += 1
         }
@@ -2593,11 +3369,28 @@ function UploadPanel() {
     return () => clearInterval(id)
   }, [jobs, loadJobs])
 
+  const handleConfirm = useCallback(
+    async (lectureId: string, domainId: string) => {
+      setConfirmingId(lectureId)
+      try {
+        await onConfirmDomain(lectureId, domainId)
+        await loadJobs()
+        onJobChanged()
+      } finally {
+        setConfirmingId(null)
+      }
+    },
+    [onConfirmDomain, loadJobs, onJobChanged],
+  )
+
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setUploadError(null)
-    const list = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.mp4'))
+    const list = Array.from(files).filter((f) => {
+      const name = f.name.toLowerCase()
+      return name.endsWith('.mp4') || name.endsWith('.mp3')
+    })
     if (list.length === 0) {
-      setUploadError('MP4 파일만 업로드할 수 있습니다')
+      setUploadError('MP4 또는 MP3 파일만 업로드할 수 있습니다')
       return
     }
     setUploading((n) => n + list.length)
@@ -2617,7 +3410,8 @@ function UploadPanel() {
       }
     }
     await loadJobs()
-  }, [loadJobs])
+    onJobChanged()
+  }, [loadJobs, onJobChanged])
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -2634,8 +3428,14 @@ function UploadPanel() {
     } catch {}
   }, [loadJobs])
 
-  const activeCount = jobs.filter((j) => !TERMINAL_STATUSES.has(j.status)).length
-  const displayJobs = jobs.slice(0, 8)
+  // 업로드 패널은 업로드 파이프라인(full/stt/correct/summary)만 다룸.
+  // 'regen' 은 강의+모델 단위의 ShowMe/Notes 재생성이라 별개 — 카운트·list 모두 제외.
+  const uploadJobs = jobs.filter((j) => j.job_type !== 'regen')
+  const activeCount = uploadJobs.filter((j) => !TERMINAL_STATUSES.has(j.status)).length
+  // 완료/취소된 작업은 list 에서 숨김 (완료는 배너로 안내, 실패는 표시 유지)
+  const displayJobs = uploadJobs
+    .filter((j) => j.status !== 'completed' && j.status !== 'canceled')
+    .slice(0, 8)
 
   return (
     <div className="border-t border-slate-100">
@@ -2646,7 +3446,7 @@ function UploadPanel() {
         <ChevronDownIcon
           className={`shrink-0 text-slate-400 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`}
         />
-        <span className="text-[12px] font-semibold text-slate-600">MP4 업로드</span>
+        <span className="text-[12px] font-semibold text-slate-600">MP4 / MP3 업로드</span>
         {activeCount > 0 && (
           <span className="ml-auto bg-teal-500 text-white text-[10px] rounded-full min-w-[18px] px-1.5 py-0.5 inline-flex items-center justify-center font-semibold leading-none">
             {activeCount}
@@ -2669,12 +3469,14 @@ function UploadPanel() {
             }`}
           >
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              MP4 파일을<br />드래그하거나 클릭
+              MP4 또는 MP3 파일을<br />드래그하거나 클릭
+              <br />
+              <span className="text-[10px] text-slate-400">MP3는 음성 추출 단계 자동 스킵</span>
             </p>
             <input
               ref={fileInputRef}
               type="file"
-              accept="video/mp4,.mp4"
+              accept="video/mp4,.mp4,audio/mpeg,.mp3"
               multiple
               className="hidden"
               onChange={(e) => {
@@ -2713,6 +3515,13 @@ function UploadPanel() {
               {displayJobs.map((job) => {
                 const isFailed = job.status === 'failed'
                 const isDone = job.status === 'completed'
+                const isAwaiting = job.status === 'awaiting_domain'
+                const lec = job.lecture_id ? lectureById.get(job.lecture_id) : undefined
+                const stageLabel =
+                  job.job_type === 'stt'     ? 'STT'
+                  : job.job_type === 'correct' ? '코렉션'
+                  : job.job_type === 'summary' ? '요약'
+                  : ''
                 return (
                   <div
                     key={job.id}
@@ -2722,12 +3531,16 @@ function UploadPanel() {
                       <div className="flex-1 min-w-0">
                         <p className="text-[11px] font-medium text-slate-700 truncate" title={job.original_name}>
                           {job.original_name}
+                          {stageLabel && (
+                            <span className="ml-1 text-slate-400">· {stageLabel}</span>
+                          )}
                         </p>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <span
                             className={`inline-block w-1.5 h-1.5 rounded-full ${
                               isDone ? 'bg-teal-500'
                               : isFailed ? 'bg-red-500'
+                              : isAwaiting ? 'bg-amber-400'
                               : job.status === 'processing' ? 'bg-amber-500 animate-pulse'
                               : job.status === 'canceled' ? 'bg-slate-300'
                               : 'bg-slate-400'
@@ -2736,6 +3549,7 @@ function UploadPanel() {
                           <span className="text-[10px] text-slate-500">
                             {job.status === 'queued' && '대기 중'}
                             {job.status === 'processing' && (job.progress_message || '처리 중')}
+                            {isAwaiting && '도메인 컨펌 대기'}
                             {job.status === 'completed' && `완료 · ${formatSize(job.file_size)}`}
                             {job.status === 'failed' && '실패'}
                             {job.status === 'canceled' && '취소됨'}
@@ -2745,6 +3559,19 @@ function UploadPanel() {
                           <p className="text-[10px] text-red-500 mt-1 line-clamp-2" title={job.error_message}>
                             {job.error_message}
                           </p>
+                        )}
+                        {isAwaiting && lec && (
+                          <div className="mt-2">
+                            <DomainPicker
+                              domains={domains}
+                              recommendedId={lec.detected_domain_id}
+                              recommendedConfidence={lec.detected_confidence}
+                              topCandidates={lec.detected_top_candidates}
+                              currentDomainId={lec.domain_id}
+                              busy={confirmingId === lec.id}
+                              onConfirm={(id) => handleConfirm(lec.id, id)}
+                            />
+                          </div>
                         )}
                       </div>
                       {job.status === 'queued' && (
@@ -2771,6 +3598,372 @@ function UploadPanel() {
 
 // ─── App ────────────────────────────────────────────────
 
+// ─── Sticky Anchor TOC (design D · Hybrid) ───────────────────────
+//
+// 강의 reader 의 sticky 칩 nav. 클릭 시 해당 섹션으로 부드럽게 점프하고
+// 스크롤 위치에 따라 활성 칩이 자동 변경.
+
+const READER_TOC_ITEMS = [
+  { k: 'overview',   label: '개요',       ico: 'sparkle' },
+  { k: 'concepts',   label: '핵심 개념',  ico: 'tag' },
+  { k: 'timeline',   label: '타임라인',   ico: 'clock' },
+  { k: 'showme',     label: '시각화',     ico: 'diagram' },
+  { k: 'qa',         label: 'Q&A',        ico: 'bulb' },
+  { k: 'notes',      label: '강의 정리',  ico: 'list' },
+  { k: 'transcript', label: '녹취록',     ico: 'doc' },
+] as const
+
+type ReaderTocKey = typeof READER_TOC_ITEMS[number]['k']
+
+function TocChipIcon({ name }: { name: string }) {
+  const ICONS: Record<string, string> = {
+    sparkle: 'M12 3v6M12 15v6M3 12h6M15 12h6M5 5l4 4M15 15l4 4M5 19l4-4M15 9l4-4',
+    list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+    doc: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6',
+    tag: 'M20 12 12 20l-9-9V3h8l9 9ZM7 7h.01',
+    clock: 'M12 6v6l4 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
+    diagram: 'M5 7h4v4H5zM15 7h4v4h-4zM10 17h4v4h-4zM7 11v4h10v-4',
+    bulb: 'M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2Z',
+  }
+  const d = ICONS[name] || ICONS.sparkle
+  return (
+    <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+      <path d={d} />
+    </svg>
+  )
+}
+
+interface AnchorTocProps {
+  scrollRef: React.RefObject<HTMLDivElement>
+  // jump 직전 호출 — 부모가 collapsed 섹션을 자동 expand 해서 anchor 가 mount 되도록 함
+  onBeforeJump?: (k: ReaderTocKey) => void
+}
+
+function AnchorToc({ scrollRef, onBeforeJump }: AnchorTocProps) {
+  const [active, setActive] = useState<ReaderTocKey>('overview')
+
+  // 핵심: AnchorToc 는 scrollRef(contentRef) **외부 sibling** 의 sticky bar 다.
+  // 즉 contentRef.scrollTo({top: X}) 후 사용자가 보이는 viewport 의 top
+  // 자체가 이미 sticky TOC 바로 아래. 추가로 TOC_HEIGHT 를 빼지 않는다.
+  // 콘텐츠 시작점(element top + inner padding) 이 contentRef viewport top 에
+  // 정렬되도록 scrollTop = elementTopAbsolute + innerPaddingTop.
+
+  // anchor wrapper 의 inner padding-top — element 자체 + 첫 child 중 큰 값.
+  const measureInnerPaddingTop = (el: HTMLElement): number => {
+    const own = parseFloat(getComputedStyle(el).paddingTop) || 0
+    const child = el.firstElementChild as HTMLElement | null
+    const childPad = child ? parseFloat(getComputedStyle(child).paddingTop) || 0 : 0
+    return Math.max(own, childPad)
+  }
+
+  useEffect(() => {
+    const root = scrollRef.current
+    if (!root) return
+    const onScroll = () => {
+      const rootRect = root.getBoundingClientRect()
+      let current: ReaderTocKey = READER_TOC_ITEMS[0].k
+      for (const t of READER_TOC_ITEMS) {
+        const el = root.querySelector<HTMLElement>('#section-' + t.k)
+        if (!el) continue
+        // 콘텐츠 시작점 (element top + inner padding) 이 root viewport top 을 지났는지
+        const contentTop = el.getBoundingClientRect().top - rootRect.top + measureInnerPaddingTop(el)
+        if (contentTop <= 4) current = t.k
+      }
+      setActive(current)
+    }
+    onScroll()
+    root.addEventListener('scroll', onScroll, { passive: true })
+    return () => root.removeEventListener('scroll', onScroll)
+  }, [scrollRef])
+
+  const performJump = (k: ReaderTocKey) => {
+    const root = scrollRef.current
+    if (!root) return
+    const el = root.querySelector<HTMLElement>('#section-' + k)
+    if (!el) return
+    const rootRect = root.getBoundingClientRect()
+    const elRect = el.getBoundingClientRect()
+    const innerPad = measureInnerPaddingTop(el)
+    // 콘텐츠 시작점이 contentRef viewport top (= sticky TOC 바로 아래) 에 정렬
+    const target = elRect.top - rootRect.top + root.scrollTop + innerPad
+    root.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
+    setActive(k)
+  }
+
+  const jumpTo = (k: ReaderTocKey) => {
+    // 부모에게 expand 신호. expand → React rerender → DOM 업데이트 후 anchor mount.
+    // 두 frame 후 실제 jump (1 frame: state commit, 2 frame: layout 안정화).
+    onBeforeJump?.(k)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => performJump(k))
+    })
+  }
+
+  return (
+    <div
+      className="shrink-0"
+      style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 5,
+        padding: '0 24px',
+        borderBottom: '1px solid var(--border)',
+        background: 'rgba(255,255,255,0.92)',
+        backdropFilter: 'blur(8px)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        height: 36,
+      }}
+    >
+      {READER_TOC_ITEMS.map((t) => {
+        const isActive = active === t.k
+        return (
+          <button
+            key={t.k}
+            onClick={() => jumpTo(t.k)}
+            style={{
+              height: 28,
+              padding: '0 10px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 12,
+              fontWeight: isActive ? 600 : 500,
+              color: isActive ? 'var(--accent-deep)' : 'var(--text-3)',
+              background: isActive ? 'var(--accent-tint)' : 'transparent',
+              borderRadius: 6,
+              border: 0,
+              cursor: 'pointer',
+            }}
+          >
+            <TocChipIcon name={t.ico} />
+            {t.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// ─── Nav placeholder 화면 (강의 / 학습 노트 / 북마크 / 도메인) ──────
+//
+// 메인 viewer 의 D · Hybrid reader 재구성은 다음 PR. 그 전까지 4개 nav
+// 가 헷갈리지 않도록 lectures 외에는 운영 데이터 기반 간단 화면을 노출.
+
+interface NavScreenProps {
+  navKey: ShellNavKey
+  insights: QaInsight[]
+  bookmarks: Bookmark[]
+  domains: DomainInfo[]
+  pendingCount: number
+  onOpenBatchReview: () => void
+  onDeleteInsight: (id: string) => void
+  onDeleteBookmark: (id: string) => void
+  onSelectLecture: (lectureId: string) => void
+  onBack: () => void
+}
+
+function NavScreen({
+  navKey,
+  insights,
+  bookmarks,
+  domains,
+  pendingCount,
+  onOpenBatchReview,
+  onDeleteInsight,
+  onDeleteBookmark,
+  onSelectLecture,
+  onBack,
+}: NavScreenProps) {
+  const title =
+    navKey === 'insights' ? '학습 노트' :
+    navKey === 'bookmarks' ? '북마크' :
+    navKey === 'domains' ? '도메인' : ''
+
+  return (
+    <div className="flex-1 overflow-y-auto" style={{ background: 'var(--bg)' }}>
+      <div style={{ maxWidth: 960, margin: '0 auto', padding: '32px 32px 80px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+          <button
+            onClick={onBack}
+            className="ds-btn ghost sm"
+            title="강의 화면으로 돌아가기"
+          >
+            ← 강의로
+          </button>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: '-0.01em', color: 'var(--text-1)' }}>
+            {title}
+          </h1>
+        </div>
+
+        {navKey === 'insights' && (
+          <NavInsights
+            insights={insights}
+            pendingCount={pendingCount}
+            onOpenBatchReview={onOpenBatchReview}
+            onDelete={onDeleteInsight}
+            onSelectLecture={onSelectLecture}
+          />
+        )}
+        {navKey === 'bookmarks' && (
+          <NavBookmarks
+            bookmarks={bookmarks}
+            onDelete={onDeleteBookmark}
+            onSelectLecture={onSelectLecture}
+          />
+        )}
+        {navKey === 'domains' && <NavDomains domains={domains} />}
+      </div>
+    </div>
+  )
+}
+
+function NavInsights({
+  insights,
+  pendingCount,
+  onOpenBatchReview,
+  onDelete,
+  onSelectLecture,
+}: {
+  insights: QaInsight[]
+  pendingCount: number
+  onOpenBatchReview: () => void
+  onDelete: (id: string) => void
+  onSelectLecture: (lectureId: string) => void
+}) {
+  return (
+    <div className="ds-card" style={{ padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-3)' }}>
+          전체 <strong style={{ color: 'var(--text-1)' }}>{insights.length}</strong>개 ·
+          승인 대기 <strong style={{ color: 'var(--amber)' }}>{pendingCount}</strong>개
+        </p>
+        {pendingCount > 0 && (
+          <button onClick={onOpenBatchReview} className="ds-btn primary sm">일괄 검토 시작</button>
+        )}
+      </div>
+      {insights.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-4)' }}>아직 학습 노트가 없습니다.</p>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 10 }}>
+          {insights.slice(0, 50).map((it) => (
+            <li key={it.id} style={{ padding: '12px 14px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--surface)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                {it.action && (
+                  <span className={`ds-pill ${it.action === 'merge' ? '' : 'amber'}`} style={{ fontSize: 10 }}>
+                    {it.action}
+                  </span>
+                )}
+                {it.lecture_id && (
+                  <button onClick={() => onSelectLecture(it.lecture_id!)} className="ds-btn ghost sm" style={{ height: 22, padding: '0 6px' }}>
+                    {it.lecture_id}
+                  </button>
+                )}
+                <span style={{ marginLeft: 'auto' }}>
+                  <button onClick={() => onDelete(it.id)} className="ds-btn ghost sm" style={{ height: 22, padding: '0 6px' }}>삭제</button>
+                </span>
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', marginBottom: 4 }}>{it.question}</div>
+              <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.7 }}>{it.answer_summary}</div>
+              {it.tags.length > 0 && (
+                <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                  {it.tags.map((t) => (
+                    <span key={t} className="ds-pill" style={{ fontSize: 10 }}>{t}</span>
+                  ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function NavBookmarks({
+  bookmarks,
+  onDelete,
+  onSelectLecture,
+}: {
+  bookmarks: Bookmark[]
+  onDelete: (id: string) => void
+  onSelectLecture: (lectureId: string) => void
+}) {
+  // 강의별 그룹화
+  const byLecture = new Map<string, Bookmark[]>()
+  for (const b of bookmarks) {
+    const k = b.lecture_id || '__no_lecture__'
+    if (!byLecture.has(k)) byLecture.set(k, [])
+    byLecture.get(k)!.push(b)
+  }
+  const groups = Array.from(byLecture.entries())
+
+  if (groups.length === 0) {
+    return (
+      <div className="ds-card" style={{ padding: 20 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-4)' }}>아직 북마크가 없습니다.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      {groups.map(([lectureId, items]) => (
+        <div key={lectureId} className="ds-card" style={{ padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <button onClick={() => onSelectLecture(lectureId)} className="ds-btn ghost sm">
+              <span style={{ fontWeight: 600 }}>{lectureId}</span>
+              <span style={{ color: 'var(--text-4)', marginLeft: 6 }}>{items.length}개</span>
+            </button>
+          </div>
+          <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 8 }}>
+            {items.map((b) => (
+              <li key={b.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--surface-2)' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: b.color, marginTop: 4, flexShrink: 0 }} />
+                <span className="ds-pill-ts">{b.time}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {b.note ? (
+                    <div style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500 }}>{b.note}</div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'var(--text-4)', fontStyle: 'italic' }}>(메모 없음)</div>
+                  )}
+                </div>
+                <button onClick={() => onDelete(b.id)} className="ds-btn ghost sm" style={{ height: 22, padding: '0 6px', flexShrink: 0 }}>삭제</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function NavDomains({ domains }: { domains: DomainInfo[] }) {
+  if (domains.length === 0) {
+    return (
+      <div className="ds-card" style={{ padding: 20 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-4)' }}>등록된 도메인이 없습니다.</p>
+      </div>
+    )
+  }
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+      {domains.map((d) => (
+        <div key={d.id} className="ds-card" style={{ padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-1)' }}>{d.name}</span>
+            <span className="ds-pill" style={{ fontSize: 10 }}>{d.id}</span>
+          </div>
+          {d.description && (
+            <p style={{ margin: 0, fontSize: 12, color: 'var(--text-3)', lineHeight: 1.7 }}>{d.description}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function App() {
   const [selectedId, setSelectedId] = useState(() => {
     const hash = decodeURIComponent(window.location.hash.slice(1))
@@ -2780,8 +3973,9 @@ export default function App() {
   const [contentSearch, setContentSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('corrected')
   const [copied, setCopied] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [activeNav, setActiveNav] = useState<ShellNavKey>('lectures')
   const [summaryCollapsed, setSummaryCollapsed] = useState(false)
+  const [notesExpanded, setNotesExpanded] = useState(false)
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true)
   const [chatOpen, setChatOpen] = useState(false)
   const [currentUser, setCurrentUser] = useState<{ email: string; display_name: string | null } | null>(null)
@@ -2802,15 +3996,136 @@ export default function App() {
     fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(setCurrentUser).catch(() => {})
   }, [])
 
+  // Lectures + domains fetched from server (도메인 그루핑용)
+  const [lectures, setLectures] = useState<Lecture[]>([])
+  const [domains, setDomains] = useState<DomainInfo[]>([])
+  const refreshLecturesAndDomains = useCallback(async () => {
+    try {
+      const [lr, dr] = await Promise.all([
+        fetch('/api/lectures'),
+        fetch('/api/domains'),
+      ])
+      if (lr.ok) setLectures(await lr.json())
+      if (dr.ok) setDomains(await dr.json())
+    } catch {
+      /* 다음 폴링에서 재시도 */
+    }
+  }, [])
+  useEffect(() => { refreshLecturesAndDomains() }, [refreshLecturesAndDomains])
+  useEffect(() => {
+    const ACTIVE = new Set(['queued', 'processing', 'awaiting_domain'])
+    const hasActive = lectures.some(
+      (l) => l.latest_job_status && ACTIVE.has(l.latest_job_status),
+    )
+    if (!hasActive) return
+    const id = setInterval(refreshLecturesAndDomains, 5000)
+    return () => clearInterval(id)
+  }, [lectures, refreshLecturesAndDomains])
+
+  const handleDomainConfirm = useCallback(
+    async (lectureId: string, domainId: string) => {
+      try {
+        await postLectureDomain(lectureId, domainId)
+        await refreshLecturesAndDomains()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        alert(`도메인 컨펌 실패: ${msg}`)
+      }
+    },
+    [refreshLecturesAndDomains],
+  )
+
   const searchRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
 
-  const selected = useMemo(() => entries.find((e) => e.id === selectedId) ?? entries[0], [selectedId])
+  // build-time 임베딩된 강의 (개발용 정적 JSON) — fallback 으로만 사용
+  const buildTimeEntry = useMemo(() => entries.find((e) => e.id === selectedId) ?? null, [selectedId])
 
-  const totalSegments = useMemo(
-    () => entries.reduce((s, e) => s + (e.corrected?.segmentCount ?? e.raw?.segmentCount ?? 0), 0),
-    [],
+  // 운영 backend 에서 단일 강의 데이터 fetch — entries 에 없는 새 강의도 정상 표시
+  type RemoteLectureData = {
+    id: string
+    original_name: string | null
+    corrected: TranscriptSegment[]
+    raw: TranscriptSegment[]
+    summary: LectureSummary | null
+  }
+  const [remoteData, setRemoteData] = useState<RemoteLectureData | null>(null)
+  const [remoteLoading, setRemoteLoading] = useState(false)
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+
+  useEffect(() => {
+    // selectedId 변경 시 이전 remoteData 를 즉시 비워 옛 강의가 잠깐 비치는
+    // 현상을 막는다 ("다른 강의로 리디렉션됨" 버그 원인).
+    setRemoteData(null)
+    setRemoteError(null)
+    if (!selectedId) {
+      setRemoteLoading(false)
+      return
+    }
+    if (buildTimeEntry?.corrected || buildTimeEntry?.raw) {
+      setRemoteLoading(false)
+      return
+    }
+    let cancelled = false
+    setRemoteLoading(true)
+    fetch(`/api/lectures/${encodeURIComponent(selectedId)}/data`)
+      .then(async (r) => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}))
+          throw new Error(err.detail || `HTTP ${r.status}`)
+        }
+        return r.json() as Promise<RemoteLectureData>
+      })
+      .then((data) => {
+        if (cancelled) return
+        setRemoteData(data)
+        setRemoteLoading(false)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setRemoteData(null)
+        setRemoteLoading(false)
+        setRemoteError(e instanceof Error ? e.message : String(e))
+      })
+    return () => { cancelled = true }
+  }, [selectedId, buildTimeEntry])
+
+  // 강의 메타 (DB lectures)
+  const selectedLecture = useMemo(
+    () => lectures.find((l) => l.id === selectedId) ?? null,
+    [lectures, selectedId],
   )
+
+  // selected = build-time entry OR remote data 로 통합. 둘 다 없으면 null.
+  // 가드: remoteData.id 가 현재 selectedId 와 일치해야만 사용 — 강의 전환 직후
+  // 잠시 옛 remoteData 가 selected 에 비치며 다른 강의로 리디렉션된 것처럼
+  // 보이던 버그 방지.
+  const selected = useMemo<TranscriptEntry | null>(() => {
+    if (buildTimeEntry) return buildTimeEntry
+    if (
+      remoteData &&
+      remoteData.id === selectedId &&
+      (remoteData.corrected.length || remoteData.raw.length || remoteData.summary)
+    ) {
+      const correctedFile: RawFile | null = remoteData.corrected.length > 0
+        ? { key: `${remoteData.id}_corrected`, name: `${remoteData.id}_corrected`, data: remoteData.corrected, isSegments: true, segmentCount: remoteData.corrected.length }
+        : null
+      const rawFile: RawFile | null = remoteData.raw.length > 0
+        ? { key: `${remoteData.id}_raw`, name: `${remoteData.id}_raw`, data: remoteData.raw, isSegments: true, segmentCount: remoteData.raw.length }
+        : null
+      // 사용자에게 보일 제목: selectedLecture.original_name (DB) → remoteData.original_name
+      // (서버 fetch 응답) → 최후 fallback 으로만 lecture_id. 확장자 .mp3/.mp4 는 제거.
+      const displayName = selectedLecture?.original_name || remoteData.original_name || remoteData.id
+      return {
+        id: remoteData.id,
+        label: displayName.replace(/\.(mp3|mp4)$/i, ''),
+        corrected: correctedFile,
+        raw: rawFile,
+        summary: remoteData.summary,
+      }
+    }
+    return null
+  }, [buildTimeEntry, remoteData, selectedId, selectedLecture])
 
   const filteredEntries = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -2855,11 +4170,12 @@ export default function App() {
 
   // Reset on entry change
   useEffect(() => {
-    contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+    // 강의 전환 시 즉시 상단으로 — smooth 는 긴 스크롤일 때 시간이 너무 걸림
+    contentRef.current?.scrollTo({ top: 0 })
     setContentSearch('')
     setViewMode('corrected')
-    setSidebarOpen(false)
     setSummaryCollapsed(false)
+    setNotesExpanded(false)
     setTranscriptCollapsed(true)
     setContextMenu(null)
     setBookmarkAddDialog(null)
@@ -2972,6 +4288,13 @@ export default function App() {
     audio.play().catch(() => {})
   }, [])
 
+  // 타임스탬프 클릭용 — 시점만 옮기고 재생 상태(play / pause) 는 그대로 유지
+  const seekAudioAt = useCallback((seconds: number) => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.currentTime = seconds
+  }, [])
+
   const copyTranscript = useCallback(() => {
     if (!activeFile?.isSegments) {
       if (activeFile) navigator.clipboard.writeText(JSON.stringify(activeFile.data, null, 2))
@@ -3025,17 +4348,55 @@ export default function App() {
       }, 1500)
     }
 
-    // Play audio from this timestamp
-    playAudioAt(targetSeconds)
-  }, [playAudioAt])
+    // 타임스탬프 클릭은 시점만 이동하고 재생 상태는 보존 (재생 중이면 그대로 재생, 일시정지면 일시정지 유지)
+    seekAudioAt(targetSeconds)
+  }, [seekAudioAt])
 
   // ─── Content rendering ──────────────────────────────
 
   function renderContent() {
     if (!selected || !activeFile) {
+      // 강의 처리 상태별로 안내 메시지 분기
+      const lec = selectedLecture
+      const status = lec?.latest_job_status
+      const stage = lec?.latest_job_type
+      let title = '파일을 선택해주세요'
+      let detail: string | null = null
+      if (selectedId && remoteLoading) {
+        title = '강의 데이터 불러오는 중…'
+      } else if (selectedId && remoteError) {
+        title = '강의 데이터를 불러올 수 없습니다'
+        detail = remoteError
+      } else if (lec) {
+        if (status === 'queued') {
+          title = '처리 대기 중인 강의입니다'
+          detail = '워커가 곧 처리를 시작합니다.'
+        } else if (status === 'processing') {
+          title = '처리 중인 강의입니다'
+          detail = stage === 'stt'
+            ? 'STT (음성 → 텍스트) 진행 중…'
+            : stage === 'correct'
+              ? '코렉션 진행 중…'
+              : stage === 'summary'
+                ? '요약 생성 중…'
+                : '강의 데이터를 만드는 중입니다.'
+        } else if (status === 'awaiting_domain') {
+          title = '도메인 컨펌이 필요한 강의입니다'
+          detail = '사이드바의 업로드 패널에서 도메인을 확인해 주세요.'
+        } else if (status === 'failed') {
+          title = '처리에 실패한 강의입니다'
+          detail = lec.latest_job_id ? '워커 로그를 확인해 주세요.' : null
+        } else {
+          title = '강의 데이터가 아직 준비되지 않았습니다'
+          detail = '잠시 후 다시 시도해 주세요.'
+        }
+      }
       return (
-        <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-          파일을 선택해주세요
+        <div className="h-full flex flex-col items-center justify-center gap-2 px-6 text-center">
+          <p style={{ fontSize: 14, color: 'var(--text-2)', margin: 0 }}>{title}</p>
+          {detail && (
+            <p style={{ fontSize: 12, color: 'var(--text-4)', margin: 0 }}>{detail}</p>
+          )}
         </div>
       )
     }
@@ -3049,9 +4410,12 @@ export default function App() {
 
       return (
         <div>
-          {/* Summary panel */}
+          {/* Summary panel — inner sections 에 section-overview/showme/concepts/timeline/qa anchor.
+              key={lectureId} 로 강제 remount → 강의 전환 시 옛 ShowMe content 즉시 unmount. */}
           {showSummary && (
             <SummaryPanel
+              key={selected.id}
+              lectureId={selected.id}
               summary={selected.summary!}
               onTimestampClick={scrollToSegment}
               collapsed={summaryCollapsed}
@@ -3067,12 +4431,19 @@ export default function App() {
             </div>
           )}
 
-          {/* Comprehensive Notes (정리) — standalone section */}
-          {selected.summary && (selected.summary.notes_gpt || selected.summary.notes_claude) && (
-            <NotesSection
-              notesGpt={selected.summary.notes_gpt ?? ''}
-              notesClaude={selected.summary.notes_claude ?? ''}
-            />
+          {/* Comprehensive Notes (강의 정리) — anchor: section-notes. Claude 단독.
+              key={lectureId} 로 강의 전환 시 강제 remount. expanded 는 controlled — TOC 자동 expand 가능. */}
+          {selected.summary && (selected.summary.notes_claude || selected.summary.notes_gpt) && (
+            <div id="section-notes" style={{ scrollMarginTop: 50 }}>
+              <NotesSection
+                key={selected.id}
+                lectureId={selected.id}
+                notesClaude={selected.summary.notes_claude ?? ''}
+                models={selected.summary.models}
+                expanded={notesExpanded}
+                onToggle={() => setNotesExpanded((v) => !v)}
+              />
+            </div>
           )}
 
           {/* Learning Notes (학습 노트) — standalone section */}
@@ -3084,8 +4455,8 @@ export default function App() {
             onRefresh={fetchInsights}
           />
 
-          {/* Transcript section header — divider + controls */}
-          <div className="shrink-0 px-5 py-2 bg-slate-50/80 border-y border-slate-200/80 flex items-center gap-2">
+          {/* Transcript section header — anchor: section-transcript */}
+          <div id="section-transcript" className="shrink-0 px-5 py-2 bg-slate-50/80 border-y border-slate-200/80 flex items-center gap-2" style={{ scrollMarginTop: 50 }}>
             <button
               onClick={() => setTranscriptCollapsed((v) => !v)}
               className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 hover:text-slate-700 mr-auto transition-colors"
@@ -3249,187 +4620,177 @@ export default function App() {
   // ─── Main render ────────────────────────────────────
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-[#f8f9fa]">
-      {/* Header */}
-      <header className="shrink-0 h-12 border-b border-slate-200/80 bg-white px-4 flex items-center justify-between z-30">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="lg:hidden p-1 -ml-1 text-slate-400 hover:text-slate-600 transition-colors"
-          >
-            <MenuIcon />
-          </button>
-          <h1 className="text-[15px] font-bold text-slate-800 tracking-tight">강의 녹취록</h1>
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
-            <span className="bg-slate-100 rounded-full px-2 py-0.5">{entries.length}개 강의</span>
-            <span className="bg-slate-100 rounded-full px-2 py-0.5">
-              {totalSegments.toLocaleString()}개 세그먼트
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="hidden md:flex items-center gap-1.5 text-[11px] text-slate-400">
-            <kbd className="font-mono bg-slate-100 rounded px-1.5 py-0.5 text-[10px]">⌘K</kbd>
-            <span className="mr-2.5">검색</span>
-            <kbd className="font-mono bg-slate-100 rounded px-1.5 py-0.5 text-[10px]">↑↓</kbd>
-            <span>탐색</span>
-          </div>
-          {currentUser && (
-            <div className="flex items-center gap-2 text-[12px] text-slate-500">
-              <span className="hidden sm:inline">{currentUser.display_name || currentUser.email}</span>
-              <a
-                href="/api/auth/logout"
-                onClick={async (e) => { e.preventDefault(); await fetch('/api/auth/logout', { method: 'POST' }); window.location.href = '/login' }}
-                className="text-slate-400 hover:text-slate-600 transition-colors"
-                title="로그아웃"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
-                </svg>
-              </a>
-            </div>
-          )}
-        </div>
-      </header>
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: 'var(--bg)' }}>
+      {/* Top header 제거 — 디자인 D · Hybrid 의 사이드바 brand + 메인 메타바 가
+          역할을 분담. 로그아웃은 사이드바 user footer, 강의 제목·카운트는 메타바.
+          ⌘K 검색은 사이드바 검색 input 으로 통합 (별도 단축키는 후속 PR). */}
 
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* Mobile overlay */}
-        {sidebarOpen && (
-          <div
-            className="fixed inset-0 bg-black/20 backdrop-blur-[1px] z-40 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
-
-        {/* Sidebar */}
-        <aside
-          className={`
-            fixed lg:static inset-y-0 left-0 z-50
-            w-64 bg-white border-r border-slate-200/80
-            flex flex-col overflow-hidden
-            transition-transform duration-200 ease-out
-            ${sidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}
-            lg:translate-x-0 lg:shadow-none
-          `}
-        >
-          {/* Search */}
-          <div className="shrink-0 p-3 border-b border-slate-100">
-            <div className="relative">
-              <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-350 w-3.5 h-3.5" />
-              <input
-                ref={searchRef}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="강의 검색..."
-                className="w-full pl-8 pr-8 py-2 text-[13px] bg-slate-50 border border-transparent rounded-lg outline-none focus:bg-white focus:border-teal-300 focus:ring-2 focus:ring-teal-100 transition placeholder:text-slate-400"
+      <div className="flex-1 overflow-hidden relative">
+        <HybridShell
+          activeNav={activeNav}
+          onNavSelect={setActiveNav}
+          activeLectureId={selected?.id ?? null}
+          lectures={lectures}
+          domains={domains}
+          insightsBadge={pendingCount}
+          userInitials={
+            currentUser?.display_name
+              ? currentUser.display_name.trim().charAt(0).toUpperCase()
+              : currentUser?.email
+                ? currentUser.email.charAt(0).toUpperCase()
+                : 'U'
+          }
+          userName={currentUser?.display_name || currentUser?.email}
+          onLectureSelect={setSelectedId}
+          onLogoutClick={async () => {
+            await fetch('/api/auth/logout', { method: 'POST' })
+            window.location.href = '/login'
+          }}
+          search={search}
+          onSearchChange={setSearch}
+          auxiliarySlot={
+            <>
+              <UploadPanel
+                lectures={lectures}
+                domains={domains}
+                onConfirmDomain={handleDomainConfirm}
+                onJobChanged={refreshLecturesAndDomains}
               />
-              {search && (
-                <button
-                  onClick={() => setSearch('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500 transition-colors"
-                >
-                  <XIcon />
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Entry list */}
-          <nav className="flex-1 overflow-y-auto px-2 py-2 scrollbar-thin">
-            <div className="space-y-px">
-              {filteredEntries.map((entry) => {
-                const isActive = entry.id === selected?.id
-                const count = entry.corrected?.segmentCount ?? entry.raw?.segmentCount ?? 0
-                const hasPair = entry.corrected && entry.raw
-                const hasSummary = !!entry.summary
-                return (
-                  <button
-                    key={entry.id}
-                    onClick={() => setSelectedId(entry.id)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg text-[13px] transition-all duration-100 ${
-                      isActive
-                        ? 'bg-teal-600 text-white font-medium shadow-sm shadow-teal-600/20'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
-                    }`}
-                    title={entry.label}
-                  >
-                    <div className="truncate leading-snug">{entry.label}</div>
-                    <div className={`flex items-center gap-2 text-[11px] mt-1 ${isActive ? 'text-teal-200' : 'text-slate-400'}`}>
-                      {count > 0 && <span>{count}개 세그먼트</span>}
-                      {hasPair && (
-                        <span className={`inline-flex items-center gap-1 ${isActive ? 'text-teal-300' : 'text-slate-300'}`}>
-                          <span className="w-1 h-1 rounded-full bg-current" />
-                          교정 + 원본
-                        </span>
-                      )}
-                      {hasSummary && (
-                        <span className={`inline-flex items-center gap-1 ${isActive ? 'text-teal-300' : 'text-teal-400'}`}>
-                          <span className="w-1 h-1 rounded-full bg-current" />
-                          요약
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-
-            {filteredEntries.length === 0 && (
-              <div className="px-4 py-8 text-center text-sm text-slate-400">
-                &ldquo;{search}&rdquo; 결과 없음
-              </div>
-            )}
-          </nav>
-
-          {/* Upload panel */}
-          <UploadPanel />
-
-          {/* Bookmarks panel */}
-          <BookmarksPanel
-            bookmarks={bookmarks}
-            onScrollTo={scrollToSegment}
-            onDelete={handleBookmarkDelete}
-          />
-
-          {/* Insights panel */}
-          <InsightsPanel
+              <BookmarksPanel
+                bookmarks={bookmarks}
+                onScrollTo={scrollToSegment}
+                onDelete={handleBookmarkDelete}
+              />
+              <InsightsPanel
+                insights={insights}
+                onDelete={handleInsightDelete}
+                pendingCount={pendingCount}
+                onOpenBatchReview={() => setBatchReviewOpen(true)}
+              />
+            </>
+          }
+        >
+        {/* Nav 분기 — 'lectures' 외 nav 는 별도 placeholder 화면.
+            메인 강의 viewer 의 D · Hybrid 재구성은 다음 PR. 여기는 기존 동작 보존. */}
+        {activeNav !== 'lectures' ? (
+          <NavScreen
+            navKey={activeNav}
             insights={insights}
-            onDelete={handleInsightDelete}
+            bookmarks={bookmarks}
+            domains={domains}
             pendingCount={pendingCount}
             onOpenBatchReview={() => setBatchReviewOpen(true)}
+            onDeleteInsight={handleInsightDelete}
+            onDeleteBookmark={handleBookmarkDelete}
+            onSelectLecture={(id) => { setSelectedId(id); setActiveNav('lectures') }}
+            onBack={() => setActiveNav('lectures')}
           />
-        </aside>
-
-        {/* Content */}
+        ) : (
+        <>
+        {/* Content row — main viewer + 우측 chat panel */}
+        <div className="flex-1 flex overflow-hidden relative" style={{ minHeight: 0 }}>
         <main className="flex-1 flex flex-col overflow-hidden relative">
-          {/* Content toolbar — title + copy only */}
+          {/* Meta bar — design D · Hybrid: 도메인 / 모델 라벨 / 강의 제목 / 카운트 + 액션 */}
           {selected && (
-            <div className="shrink-0 border-b border-slate-200/80 px-5 py-2.5 flex items-center gap-3 bg-white">
-              <h2 className="text-[14px] font-semibold text-slate-800 truncate min-w-0 mr-auto">
-                {selected.label}
-              </h2>
-
-              {/* Copy */}
-              <button
-                onClick={copyTranscript}
-                className={`p-1.5 rounded-md transition-colors ${
-                  copied ? 'text-teal-500 bg-teal-50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
-                }`}
-                title={copied ? '복사됨!' : '클립보드에 복사'}
-              >
-                {copied ? <CheckIcon /> : <CopyIcon />}
-              </button>
+            <div
+              className="shrink-0"
+              style={{
+                padding: '12px 24px 10px',
+                borderBottom: '1px solid var(--border)',
+                background: 'var(--surface)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-3)', marginBottom: 3, flexWrap: 'wrap' }}>
+                  <LectureDomainBadge
+                    lecture={selectedLecture}
+                    domains={domains}
+                    onConfirm={(domainId) =>
+                      handleDomainConfirm(selectedLecture!.id, domainId)
+                    }
+                  />
+                  {selected.summary?.models?.claude_summary && (
+                    <span className="mono" style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-4)' }}>
+                      · {selected.summary.models.claude_summary}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {/* selectedLecture.original_name (DB) 가 가장 정확. build-time
+                      entries.label 은 underscore 를 공백으로 변환해서 file_hash
+                      형식 lecture_id 가 보기 흉하게 표시될 수 있다. */}
+                  {(selectedLecture?.original_name?.replace(/\.(mp3|mp4)$/i, '') || selected.label)}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+                <span className="ds-pill" title="북마크 개수" style={{ fontSize: 11 }}>
+                  <BookmarkIcon className="w-3 h-3" /> {bookmarks.length}
+                </span>
+                <span className="ds-pill" title="학습 노트 개수" style={{ fontSize: 11 }}>
+                  <LightBulbIcon className="w-3 h-3" /> {insights.length}
+                </span>
+                <button
+                  onClick={copyTranscript}
+                  className="ds-btn ghost sm"
+                  style={{ padding: '0 6px' }}
+                  title={copied ? '복사됨!' : '클립보드에 복사'}
+                >
+                  {copied ? <CheckIcon /> : <CopyIcon />}
+                </button>
+              </div>
             </div>
+          )}
+
+          {/* 코렉션 재생성 배너 */}
+          {selectedLecture && (
+            selectedLecture.latest_job_status === 'queued' ||
+            selectedLecture.latest_job_status === 'processing'
+          ) && selectedLecture.latest_job_type !== 'stt' && (
+            <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-5 py-2 text-[12px] text-amber-800">
+              {selectedLecture.latest_job_type === 'correct' && '도메인 변경에 따라 코렉션을 다시 생성하는 중입니다...'}
+              {selectedLecture.latest_job_type === 'summary' && '요약을 생성하는 중입니다...'}
+            </div>
+          )}
+
+          {/* Sticky anchor TOC — design D · Hybrid.
+              onBeforeJump 으로 collapsed 섹션을 자동 expand → DOM 안정 후 jump. */}
+          {selected && selected.summary && (
+            <AnchorToc
+              scrollRef={contentRef}
+              onBeforeJump={(k) => {
+                if (k === 'overview' || k === 'concepts' || k === 'timeline' || k === 'showme' || k === 'qa') {
+                  setSummaryCollapsed(false)
+                } else if (k === 'notes') {
+                  setNotesExpanded(true)
+                } else if (k === 'transcript') {
+                  setTranscriptCollapsed(false)
+                }
+              }}
+            />
           )}
 
           {/* Scrollable content */}
-          <div ref={contentRef} className="flex-1 overflow-y-auto bg-white scrollbar-thin">
+          <div ref={contentRef} className="flex-1 overflow-y-auto scrollbar-thin" style={{ background: 'var(--bg)' }}>
             {renderContent()}
           </div>
 
-          {/* Audio player */}
+          {/* Audio player — design D · Hybrid: 북마크 색상 마커 + 재생헤드 */}
           {selected && (
-            <div className="shrink-0 border-t border-slate-200/80 bg-slate-50 px-4 py-2 flex items-center gap-3">
+            <div
+              className="shrink-0"
+              style={{
+                height: 52,
+                borderTop: '1px solid var(--border)',
+                background: 'var(--surface)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '0 24px',
+              }}
+            >
               <audio
                 ref={audioRef}
                 src={audioSrc}
@@ -3446,7 +4807,18 @@ export default function App() {
                   if (!a) return
                   audioPlaying ? a.pause() : a.play().catch(() => {})
                 }}
-                className="shrink-0 w-8 h-8 rounded-full bg-teal-600 text-white hover:bg-teal-700 transition flex items-center justify-center"
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: 'var(--accent)',
+                  color: '#fff',
+                  border: 0,
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
                 title={audioPlaying ? '일시정지' : '재생'}
               >
                 {audioPlaying ? (
@@ -3455,26 +4827,116 @@ export default function App() {
                   <svg className="w-3.5 h-3.5 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                 )}
               </button>
-              <span className="text-[11px] font-mono text-slate-500 w-[72px] shrink-0">
-                {formatTime(audioTime)} / {formatTime(audioDuration)}
+              <span
+                className="mono"
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--text-3)',
+                  minWidth: 44,
+                  flexShrink: 0,
+                }}
+              >
+                {formatTime(audioTime)}
               </span>
-              <input
-                type="range"
-                min={0}
-                max={audioDuration || 1}
-                step={0.1}
-                value={audioTime}
-                onChange={(e) => {
-                  const t = Number(e.target.value)
+              {/* Marker-rich progress track */}
+              <div
+                style={{
+                  flex: 1,
+                  height: 18,
+                  position: 'relative',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+                onClick={(e) => {
+                  if (!audioDuration) return
+                  const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+                  const t = ratio * audioDuration
                   setAudioTime(t)
                   if (audioRef.current) audioRef.current.currentTime = t
                 }}
-                className="flex-1 h-1.5 accent-teal-600 cursor-pointer"
-              />
+              >
+                {/* track */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    right: 0,
+                    height: 4,
+                    background: 'var(--surface-3)',
+                    borderRadius: 2,
+                  }}
+                />
+                {/* progress */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    height: 4,
+                    width: audioDuration > 0 ? `${(audioTime / audioDuration) * 100}%` : '0%',
+                    background: 'var(--accent)',
+                    borderRadius: 2,
+                  }}
+                />
+                {/* bookmark markers */}
+                {audioDuration > 0 &&
+                  bookmarks.map((b) => {
+                    const sec = parseTimestamp(b.time)
+                    const pct = Math.max(0, Math.min(100, (sec / audioDuration) * 100))
+                    return (
+                      <div
+                        key={b.id}
+                        title={`${b.time}${b.note ? ' · ' + b.note : ''}`}
+                        style={{
+                          position: 'absolute',
+                          left: `${pct}%`,
+                          top: 'calc(50% - 7px)',
+                          width: 2,
+                          height: 14,
+                          background: b.color,
+                          transform: 'translateX(-1px)',
+                          pointerEvents: 'none',
+                        }}
+                      />
+                    )
+                  })}
+                {/* play head */}
+                {audioDuration > 0 && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: `${(audioTime / audioDuration) * 100}%`,
+                      top: 'calc(50% - 6px)',
+                      width: 12,
+                      height: 12,
+                      borderRadius: '50%',
+                      background: 'var(--accent)',
+                      boxShadow: '0 0 0 3px rgba(13, 148, 136, 0.2)',
+                      transform: 'translateX(-6px)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                )}
+              </div>
+              <span
+                className="mono"
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--text-3)',
+                  minWidth: 44,
+                  flexShrink: 0,
+                }}
+              >
+                {formatTime(audioDuration)}
+              </span>
               <select
-                value={1}
+                defaultValue={1}
                 onChange={(e) => { if (audioRef.current) audioRef.current.playbackRate = Number(e.target.value) }}
-                className="text-[11px] bg-white border border-slate-200 rounded px-1 py-0.5 text-slate-500"
+                className="ds-btn sm"
+                style={{ padding: '0 6px', appearance: 'none' }}
               >
                 <option value={0.75}>0.75x</option>
                 <option value={1}>1x</option>
@@ -3509,6 +4971,10 @@ export default function App() {
             />
           </>
         )}
+        </div>
+        </>
+        )}
+        </HybridShell>
       </div>
 
       {/* Context menu */}

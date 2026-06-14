@@ -29,14 +29,21 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-https://lecture.agentryx-ai.com/api/auth/google/callback}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CHAT_MODEL: ${CHAT_MODEL:-claude-sonnet-4-6}
-      # 파이프라인 관련
+      # 파이프라인 관련 (선택적: 키 없으면 STT/도메인 감지 기능만 비활성)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       STT_PROVIDER: ${STT_PROVIDER:-elevenlabs}
-      CORRECTION_MODEL: ${CORRECTION_MODEL:-gpt-5.4}
       DOMAIN_DETECTION: ${DOMAIN_DETECTION:-auto}
       MAX_WORKERS: ${MAX_WORKERS:-20}
+      # ── 모델 (.env 가 single source of truth, 누락 시 기동 실패) ──
+      CHAT_MODEL: ${CHAT_MODEL:?CHAT_MODEL must be set in .env}
+      INSIGHT_MODEL: ${INSIGHT_MODEL:?INSIGHT_MODEL must be set in .env}
+      CORRECTION_MODEL: ${CORRECTION_MODEL:?CORRECTION_MODEL must be set in .env}
+      LECTURE_GPT_MODEL: ${LECTURE_GPT_MODEL:?LECTURE_GPT_MODEL must be set in .env}
+      LECTURE_NOTES_MODEL: ${LECTURE_NOTES_MODEL:?LECTURE_NOTES_MODEL must be set in .env}
+      DOMAIN_KEYWORD_MODEL: ${DOMAIN_KEYWORD_MODEL:?DOMAIN_KEYWORD_MODEL must be set in .env}
+      DOMAIN_EMBEDDING_MODEL: ${DOMAIN_EMBEDDING_MODEL:?DOMAIN_EMBEDDING_MODEL must be set in .env}
+      DOMAIN_DRAFT_MODEL: ${DOMAIN_DRAFT_MODEL:?DOMAIN_DRAFT_MODEL must be set in .env}
       # 업로드 처리 워커 풀
       WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-30}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-5}

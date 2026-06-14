@@ -7,6 +7,7 @@ STT 결과에서 키워드를 추출 → 임베딩 → 도메인 시그니처와
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -14,8 +15,8 @@ import openai
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 
-KEYWORD_MODEL = "gpt-4.1-nano"
-EMBEDDING_MODEL = "text-embedding-3-small"
+KEYWORD_MODEL = os.environ.get("DOMAIN_KEYWORD_MODEL", "gpt-4.1-nano")
+EMBEDDING_MODEL = os.environ.get("DOMAIN_EMBEDDING_MODEL", "text-embedding-3-small")
 SAMPLE_HEAD = 15
 SAMPLE_MIDDLE = 5
 
@@ -28,6 +29,7 @@ class DomainMatch(NamedTuple):
     confidence: float     # cosine similarity (0.0 if generic fallback)
     system_prompt: str
     user_prompt: str
+    candidates: list[tuple[str, float]]  # (domain_id, score) — 모든 등록 도메인 점수, 높은 순. generic 은 제외
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -54,13 +56,16 @@ def detect_domain(
     cached = _load_cache(cache_dir, video_stem, stt_provider)
     if cached is not None:
         domain_id, confidence = cached["domain_id"], cached["confidence"]
+        candidates_raw = cached.get("candidates", [])
+        candidates = [(c["domain_id"], float(c["score"])) for c in candidates_raw]
         print(f"  [캐시] 도메인: {domain_id} (신뢰도: {confidence:.3f})")
-        return DomainMatch(domain_id, confidence, *_load_prompts(domain_id))
+        system, user = _load_prompts(domain_id)
+        return DomainMatch(domain_id, confidence, system, user, candidates)
 
     # 세그먼트가 너무 적으면 generic
     if len(raw_segments) < 5:
         result = _generic_match()
-        _save_cache(cache_dir, video_stem, stt_provider, result.domain_id, result.confidence)
+        _save_cache(cache_dir, video_stem, stt_provider, result.domain_id, result.confidence, [])
         return result
 
     # 1. 샘플링
@@ -71,7 +76,7 @@ def detect_domain(
     keywords = _extract_keywords(sample_text, client)
     if not keywords:
         result = _generic_match()
-        _save_cache(cache_dir, video_stem, stt_provider, result.domain_id, result.confidence)
+        _save_cache(cache_dir, video_stem, stt_provider, result.domain_id, result.confidence, [])
         return result
 
     # 3. 키워드 임베딩
@@ -80,21 +85,31 @@ def detect_domain(
 
     # 4. 각 도메인 시그니처와 비교 (없으면 자동 생성)
     _ensure_domain_embeddings(domains, client)
-    best_id, best_score = "generic", 0.0
+    scores: list[tuple[str, float]] = []
     for domain in domains:
         sig_vec = _load_domain_embedding(domain["id"])
         if sig_vec is None:
             continue
         score = _cosine_similarity(query_vec, sig_vec)
-        if score > best_score:
-            best_id, best_score = domain["id"], score
+        scores.append((domain["id"], score))
+    scores.sort(key=lambda kv: kv[1], reverse=True)
+
+    if not scores:
+        result = _generic_match()
+        _save_cache(cache_dir, video_stem, stt_provider, result.domain_id, result.confidence, [])
+        return result
+
+    best_id, best_score = scores[0]
 
     # 5. 임계값 판정
     if best_score < threshold:
-        best_id, best_score = "generic", 0.0
+        best_id_label, best_score_label = "generic", 0.0
+    else:
+        best_id_label, best_score_label = best_id, best_score
 
-    _save_cache(cache_dir, video_stem, stt_provider, best_id, best_score)
-    return DomainMatch(best_id, best_score, *_load_prompts(best_id))
+    _save_cache(cache_dir, video_stem, stt_provider, best_id_label, best_score_label, scores)
+    system, user = _load_prompts(best_id_label)
+    return DomainMatch(best_id_label, best_score_label, system, user, scores)
 
 
 def precompute_domain_embeddings(client: openai.OpenAI) -> None:
@@ -217,7 +232,8 @@ def _load_prompts(domain_id: str) -> tuple[str, str]:
 
 def _generic_match() -> DomainMatch:
     """generic 프롬프트를 반환한다."""
-    return DomainMatch("generic", 0.0, *_load_prompts("generic"))
+    system, user = _load_prompts("generic")
+    return DomainMatch("generic", 0.0, system, user, [])
 
 
 def _cache_key(video_stem: str, stt_provider: str) -> str:
@@ -237,10 +253,17 @@ def _load_cache(cache_dir: Path, video_stem: str, stt_provider: str) -> dict | N
 def _save_cache(
     cache_dir: Path, video_stem: str, stt_provider: str,
     domain_id: str, confidence: float,
+    candidates: list[tuple[str, float]],
 ) -> None:
     path = cache_dir / f"{_cache_key(video_stem, stt_provider)}.json"
     path.write_text(
-        json.dumps({"domain_id": domain_id, "confidence": confidence}),
+        json.dumps({
+            "domain_id": domain_id,
+            "confidence": confidence,
+            "candidates": [
+                {"domain_id": d, "score": s} for d, s in candidates
+            ],
+        }),
         encoding="utf-8",
     )
 

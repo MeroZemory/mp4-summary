@@ -23,10 +23,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY viewer/backend/ .
 COPY --from=frontend /build/viewer/frontend/dist ./dist
 
-# 파이프라인 스크립트 + 도메인 프롬프트 복사 (import 및 런타임에 필요)
+# 파이프라인 스크립트 + 도메인 프롬프트 + 마이그레이션 스크립트 (import 및 런타임에 필요)
 COPY extract_and_correct.py /project/extract_and_correct.py
 COPY domain_detector.py /project/domain_detector.py
 COPY prompts/ /project/prompts/
+COPY scripts/ /project/scripts/
 RUN mkdir -p /project/downloads /project/output /project/embeddings_cache
 
 ENV DIST_DIR=/app/dist \

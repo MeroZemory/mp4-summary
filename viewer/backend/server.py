@@ -20,8 +20,11 @@ from auth import COOKIE_NAME, GOOGLE_CLIENT_ID, decode_token, router as auth_rou
 from bookmarks import router as bookmarks_router
 from chat import router as chat_router
 from db import close_pool, run_migrations
+from domains import router as domains_router
 from jobs import create_worker_manager, router as jobs_router
 from lecture_data import load_lecture_data
+from lectures import router as lectures_router
+from module_versions import router as module_versions_router
 from qa_extraction import router as insights_router
 
 # ── Paths ──
@@ -64,8 +67,11 @@ app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(bookmarks_router)
 app.include_router(chat_router)
+app.include_router(domains_router)
 app.include_router(insights_router)
 app.include_router(jobs_router)
+app.include_router(lectures_router)
+app.include_router(module_versions_router)
 
 
 # ── Login / Register pages (server-rendered HTML) ──
